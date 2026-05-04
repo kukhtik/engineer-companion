@@ -1,0 +1,24 @@
+[project]
+name = "engineer-companion"
+version = "0.1.0"
+description = "Offline RAG companion for TrueBeam/VitalBeam field service documentation"
+requires-python = ">=3.10"
+dependencies = [
+    "pymupdf>=1.23.0",
+    "lancedb>=0.12.0",
+    "sentence-transformers>=3.0.0",
+    "llama-cpp-python>=0.3.0",
+    "numpy\u003e=1.26.0",
+    "tiktoken\u003e=0.7.0",
+    "pyarrow\u003e=15.0.0",
+    "pydantic\u003e=2.0.0",
+    "structlog>=24.0.0",
+]
+
+[project.optional-dependencies]
+windows = ["PySide6>=6.6.0"]
+android = ["kivy>=2.3.0", "buildozer>=1.5.0"]
+dev = ["pytest>=8.0.0", "pytest-qt>=4.0.0", "pytest-asyncio>=0.23.0"]
+
+[tool.setuptools.packages.find]
+where = ["core"]
