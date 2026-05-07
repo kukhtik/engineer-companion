@@ -32,3 +32,25 @@ Offline RAG-компаньон для сервисного инженера об
 - Всё работает offline: модели + embeddings + DB — локально
 - Samsung S25: <=6GB RAM для модели, NPU если доступен через MediaPipe
 - Первый MVP только Windows, Android — после стабилизации core
+
+## Текущий статус (2026-05-07)
+### Сделано
+- `core/indexer.py` — PDF → chunks → embeddings (CPU) → LanceDB, 12 PDF (~4000 стр), 23757 чанков, 45 МБ
+- `core/query.py` — Retriever (cosine search), PromptBuilder, RAGQueryPipeline
+- `windows/main_window.py` — PySide6 GUI: search bar, results list, chat panel, QueryWorker (QThread)
+- `design/tokens.py` — impeccable-ui dark palette, Qt stylesheet
+- `tests/test_behavioral_windows.py` — 9 behavioral UI tests, все проходят (headless)
+- `.venv` создан через `uv venv .venv --python 3.11`, PySide6 установлен
+
+### Блокер
+- `llama-cpp-python` не установлен ни в system Python, ни в `.venv`
+- `sentence-transformers` в `.venv` не работает (нужен torch, но `.venv` пуст — system-site-packages не подцепил system dist-packages)
+- End-to-end с LLM не проверен
+
+### Следующие шаги
+1. Установить `llama-cpp-python` + `sentence-transformers` + `torch` CPU в `.venv`
+2. End-to-end: `RAGQueryPipeline.ask()` с Gemma 3 4B и реальной DB
+3. Core unit tests: `test_indexer_pdf_chunking`, `test_retriever_cosine_search`, `test_prompt_builder`
+4. GUI: rich text ответов (QTextBrowser), история чата, избранное/закладки
+5. Entry point: `python -m engineer_companion` или `run.sh`
+6. Git commit с тегом `v0.1-mvp`
