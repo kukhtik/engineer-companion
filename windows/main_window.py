@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, Signal, QUrl
 from PySide6.QtWidgets import (
     QApplication, QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMainWindow, QPushButton, QTextBrowser,
@@ -74,8 +74,16 @@ class ChatHistory:
                 self.entries = []
 
     def add(self, query: str, answer: str, sources: list[dict]) -> None:
-        self.entries.append({"query": query, "answer": answer, "sources": sources})
+        self.entries.append({"query": query, "answer": answer, "sources": sources, "bookmarked": False})
         self.save()
+
+    def toggle_bookmark(self, idx: int) -> bool:
+        if 0 <= idx < len(self.entries):
+            entry = self.entries[idx]
+            entry["bookmarked"] = not entry.get("bookmarked", False)
+            self.save()
+            return entry["bookmarked"]
+        return False
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -84,8 +92,13 @@ class ChatHistory:
 
     def format_html(self) -> str:
         parts = []
-        for e in self.entries:
-            parts.append(f'<hr><div style="color:#7A7A7A;font-size:12px;margin-bottom:4px;">Вопрос: {html.escape(e["query"])}</div>')
+        for i, e in enumerate(self.entries):
+            star = "★" if e.get("bookmarked") else "☆"
+            parts.append(
+                f'<hr><div style="color:#7A7A7A;font-size:12px;margin-bottom:4px;">'
+                f'<a href="bookmark://{i}" style="text-decoration:none;color:#FFD700;font-size:14px;">{star}</a> '
+                f'Вопрос: {html.escape(e["query"])}</div>'
+            )
             parts.append(f'<div style="margin-bottom:8px;">{_markdownish_to_html(e["answer"])}</div>')
             parts.append('<div style="color:#7A7A7A;font-size:11px;">Источники:</div>')
             for src in e.get("sources", []):
@@ -163,6 +176,7 @@ class CompanionWindow(QMainWindow):
 
         self.chat_log = QTextBrowser()
         self.chat_log.setOpenExternalLinks(False)
+        self.chat_log.anchorClicked.connect(self._on_anchor_clicked)
         self.chat_log.setHtml(
             '<div style="color:#7A7A7A;">'
             "Здесь появится ответ эксперта...<br>"
@@ -229,10 +243,7 @@ class CompanionWindow(QMainWindow):
         answer = result.get("answer", "")
         sources = result.get("sources", [])
 
-        self.chat_log.append("<hr>")
-        self.chat_log.append(f'<div style="color:#7A7A7A;font-size:12px;margin-bottom:4px;">Ответ:</div>')
-        self.chat_log.append(_markdownish_to_html(answer))
-
+        self.results_list.clear()
         for src in sources:
             item_text = f"{src['source']}    стр.{src['page']}    [{src['section'][:40]}]"
             item = QListWidgetItem(item_text)
@@ -243,6 +254,7 @@ class CompanionWindow(QMainWindow):
 
         source_meta = [{"source": s["source"], "page": s["page"], "section": s["section"]} for s in sources]
         self.history.add(self._current_query, answer, source_meta)
+        self.chat_log.setHtml(self.history.format_html())
 
     def _on_error(self, msg: str) -> None:
         self.chat_log.append(f'[Ошибка: {html.escape(msg)}]')
@@ -261,6 +273,12 @@ class CompanionWindow(QMainWindow):
             f'стр.{data["page"]} — {html.escape(data["section"])}'
             f'</div>'
         )
+
+    def _on_anchor_clicked(self, url: QUrl) -> None:
+        if url.scheme() == "bookmark":
+            idx = int(url.host())
+            self.history.toggle_bookmark(idx)
+            self.chat_log.setHtml(self.history.format_html())
 
 
 def main() -> None:

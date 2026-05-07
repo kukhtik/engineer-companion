@@ -115,6 +115,34 @@ class TestUserSearchFlow:
         assert window.meta_label.objectName() == "muted"
 
 
+class TestBookmarks:
+    """Star / unstar history entries via QTextBrowser anchor clicks."""
+
+    def test_bookmark_toggle_changes_star_state(self, app, window):
+        # Inject a fake entry so history is not empty
+        window.history.entries = [
+            {"query": "Q1", "answer": "A1", "sources": [], "bookmarked": False}
+        ]
+        window.history.save()
+        window._restore_history()
+        app.processEvents()
+
+        # Toggle via method (anchorClicked is harder to simulate headless)
+        assert window.history.entries[0]["bookmarked"] is False
+        window.history.toggle_bookmark(0)
+        assert window.history.entries[0]["bookmarked"] is True
+        window.history.toggle_bookmark(0)
+        assert window.history.entries[0]["bookmarked"] is False
+
+    def test_history_html_shows_star_for_bookmarked(self, app, window):
+        window.history.entries = [
+            {"query": "Q1", "answer": "A1", "sources": [], "bookmarked": True}
+        ]
+        html_out = window.history.format_html()
+        assert "★" in html_out
+        assert "bookmark://0" in html_out
+
+
 class TestUIWithMockPipeline:
     """Inject a mock pipeline returning fixed results; verify full flow."""
 
