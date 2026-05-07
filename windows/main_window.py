@@ -60,8 +60,9 @@ def _markdownish_to_html(text: str) -> str:
 class ChatHistory:
     """Persistent chat history as JSON lines."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, max_entries: int = 200) -> None:
         self.path = path
+        self.max_entries = max_entries
         self.entries: list[dict[str, Any]] = []
         self._load()
 
@@ -75,6 +76,7 @@ class ChatHistory:
 
     def add(self, query: str, answer: str, sources: list[dict]) -> None:
         self.entries.append({"query": query, "answer": answer, "sources": sources, "bookmarked": False})
+        self._prune()
         self.save()
 
     def toggle_bookmark(self, idx: int) -> bool:
@@ -93,6 +95,22 @@ class ChatHistory:
     def clear(self) -> None:
         self.entries = []
         self.save()
+
+    def prune(self) -> None:
+        """Remove oldest non-bookmarked entries if over limit."""
+        while len(self.entries) > self.max_entries:
+            # Find oldest non-bookmarked
+            for i, e in enumerate(self.entries):
+                if not e.get("bookmarked", False):
+                    self.entries.pop(i)
+                    break
+            else:
+                # All bookmarked — remove oldest anyway
+                self.entries.pop(0)
+
+    def _prune(self) -> None:
+        """Auto-prune without explicit call in add()."""
+        self.prune()
 
     def format_html(self) -> str:
         parts = []
@@ -178,6 +196,11 @@ class CompanionWindow(QMainWindow):
         self.clear_btn.clicked.connect(self._on_clear_history)
         left_v.addWidget(self.meta_label)
         left_v.addWidget(self.clear_btn)
+
+        # ---- Prune button ----
+        self.prune_btn = QPushButton("✂️ Удалить старые (>200)")
+        self.prune_btn.clicked.connect(self._on_prune_history)
+        left_v.addWidget(self.prune_btn)
 
         # ---- Right area: chat splitter ----
         right = QSplitter(Qt.Vertical)
@@ -295,6 +318,14 @@ class CompanionWindow(QMainWindow):
             "История очищена.<br>"
             "Введите вопрос слева и нажмите Найти."
             "</div>"
+        )
+
+    def _on_prune_history(self) -> None:
+        old = len(self.history.entries)
+        self.history.prune()
+        new = len(self.history.entries)
+        self.chat_log.append(
+            f'<div style="color:#7A7A7A;">Удалено {old - new} старых записей. Осталось: {new}</div>'
         )
 
 
