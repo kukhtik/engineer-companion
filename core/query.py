@@ -66,7 +66,7 @@ class Retriever:
 
     def search(self, query: str) -> list[SearchResult]:
         model = self._get_model()
-        emb = model.encode(query, normalize_embeddings=True).tolist()
+        emb = model.encode(query, normalize_embeddings=True, device="cpu").tolist()
 
         table = self._get_table()
         results = table.search(emb).metric("cosine").limit(self.top_k).to_list()
@@ -200,7 +200,7 @@ if __name__ == "__main__":
     )
     ap = argparse.ArgumentParser()
     ap.add_argument("--db-path", default="/mnt/e/engineer-companion/assets/db/engineer.db", type=Path)
-    ap.add_argument("--llm-path", default="/mnt/e/engineer-companion/assets/models/qwen2.5-7b-instruct-q4_k_m.gguf", type=Path)
+    ap.add_argument("--llm-path", default="/mnt/e/engineer-companion/assets/models/gemma-3-4b-it-Q4_K_M.gguf", type=Path)
     ap.add_argument("query", nargs="+")
     args = ap.parse_args()
 

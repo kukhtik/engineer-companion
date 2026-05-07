@@ -188,7 +188,7 @@ def main() -> None:
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--db-path", type=Path, default=_REPO / "assets" / "db" / "engineer.db")
-    ap.add_argument("--llm-path", type=Path, default=_REPO / "assets" / "models" / "qwen2.5-7b-instruct-q4_k_m.gguf")
+    ap.add_argument("--llm-path", type=Path, default=_REPO / "assets" / "models" / "gemma-3-4b-it-Q4_K_M.gguf")
     ap.add_argument("--no-llm", action="store_true", help="Run without LLM (search-only mode)")
     args = ap.parse_args()
 

@@ -21,4 +21,4 @@ android = ["kivy>=2.3.0", "buildozer>=1.5.0"]
 dev = ["pytest>=8.0.0", "pytest-qt>=4.0.0", "pytest-asyncio>=0.23.0"]
 
 [tool.setuptools.packages.find]
-where = ["core"]
+where = ["core", "android", "design", "windows"]

@@ -161,7 +161,7 @@ class DocumentIndexPipeline:
 
         model = self._get_model()
         texts = [c.text for c in chunks]
-        embeddings = model.encode(texts, show_progress_bar=False, convert_to_numpy=True, normalize_embeddings=True)
+        embeddings = model.encode(texts, show_progress_bar=False, convert_to_numpy=True, normalize_embeddings=True, device="cpu")
 
         table = self._get_table()
         records = []
@@ -200,8 +200,8 @@ if __name__ == "__main__":
         logger_factory=structlog.PrintLoggerFactory(),
     )
     ap = argparse.ArgumentParser()
-    ap.add_argument("--docs-dir", default="/mnt/e/DOCS", type=Path)
-    ap.add_argument("--db-path", default="/mnt/e/engineer-companion/assets/db/engineer.db", type=Path)
+    ap.add_argument("--docs-dir", default="docs", type=Path)
+    ap.add_argument("--db-path", default="assets/db/engineer.db", type=Path)
     ap.add_argument("--chunk-size", type=int, default=512)
     ap.add_argument("--overlap", type=int, default=64)
     args = ap.parse_args()
