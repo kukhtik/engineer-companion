@@ -26,12 +26,16 @@ case "${1:-run}" in
     gui)
         exec "$PYTHON" -c "from windows.main_window import main; main()" "${@:2}"
         ;;
+    build)
+        exec "$PYTHON" scripts/build_windows.py "${@:2}"
+        ;;
     *)
-        echo "Usage: $0 {run|test|index|gui} [args...]"
-        echo "  run  - Launch GUI (default)"
-        echo "  test - Run pytest suite"
-        echo "  index- Rebuild vector DB from PDFs"
-        echo "  gui  - Launch GUI directly"
+        echo "Usage: $0 {run|test|index|gui|build} [args...]"
+        echo "  run   - Launch GUI (default)"
+        echo "  test  - Run pytest suite"
+        echo "  index - Rebuild vector DB from PDFs"
+        echo "  gui   - Launch GUI directly"
+        echo "  build - Build Windows EXE via PyInstaller"
         exit 1
         ;;
 esac

@@ -1,40 +1,27 @@
 # MVP Plan — engineer-companion
 
 ## Completed
-- [x] `pyproject.toml` — зависимости declarative
+- [x] `pyproject.toml` — зависимости declarative + entry points (`engineer-companion`, `engineer-indexer`)
 - [x] `core/indexer.py` default `--docs-dir` → repo-relative `docs/`
 - [x] `.gitignore` — `docs/`, `assets/db/`, `assets/models/`, `.venv/`
 - [x] Phase A — Index build: 12 PDF, 23757 chunks, 45 MB LanceDB
 - [x] Phase B — Query pipeline: `Retriever.search()` returns results with source/page/section
-- [x] Phase C — UI tests: 9/9 passed (headless offscreen)
-- [x] Phase D — GUI skeleton: search, results, chat panel
+- [x] Phase C — Core unit tests: 7/7 passed (`test_core.py`)
+- [x] Phase D — UI tests: 12/12 passed (`test_behavioral_windows.py` headless offscreen)
+- [x] Phase E — GUI: QTextBrowser + markdown-ish rendering, ChatHistory persistence (`~/.engineer-companion/history.json`)
+- [x] Phase F — Bookmarks: ☆/★ toggle, anchor click in QTextBrowser, auto-prune >200
+- [x] Phase G — Clear/Prune UI buttons: clear all, manual prune old non-bookmarked
+- [x] `run.sh` launcher — `gui`, `test`, `index`, `run` modes
+- [x] 19/19 tests green, CI-ready
 
-## In Progress / Blocked
-- [ ] End-to-end with LLM (`llama-cpp-python` install blocked)
-- [ ] Core unit tests (indexer + query, без UI)
-
-## Todo
-1. **Environment fix** — установить `llama-cpp-python`, `torch` CPU, `sentence-transformers` в `.venv`
-2. **End-to-end test** — `RAGQueryPipeline.ask("TrueBeam interlock")` с Gemma 3 4B
-3. **Core unit tests**
-   - `test_indexer_extracts_text_from_pdf`
-   - `test_indexer_chunks_have_overlap`
-   - `test_indexer_heading_detection`
-   - `test_retriever_search_returns_searchresult`
-   - `test_retriever_cosine_metric_sorts_correctly`
-   - `test_prompt_builder_includes_system_persona`
-   - `test_prompt_builder_includes_source_citations`
-   - `test_rag_pipeline_ask_returns_dict_with_answer_and_sources`
-4. **GUI enhancements**
-   - Rich text ответов (QTextBrowser с markdown-like styling)
-   - История чата (список сессий, сохранение в SQLite)
-   - Избранное/закладки (star результат, экспорт в JSON)
-5. **Entry point**
-   - `run.sh` / `run.bat` — активация `.venv` + `python windows/main_window.py`
-   - `python -m engineer_companion` (пакетный entry point)
-6. **Git**
-   - Commit: deps, path fix, `.gitignore`, core, windows, tests
-   - Tag: `v0.1-mvp`
+## In Progress / Planned (Next 5 Steps)
+1. **Smoke test LLM e2e** — `RAGQueryPipeline.ask("TrueBeam interlock")` с `gemma-3-4b-it-Q4_K_M.gguf`, benchmark CPU tok/s, verify answer quality.
+2. **Bookmarks filter + search history** — UI checkbox «Только избранное», QLineEdit поиск по `query`/`answer` в `history.json`.
+3. **Build skills** —
+   - **Windows EXE** (`scripts/build_windows.py`): PyInstaller однофайл, `--windowed`, exclude torch (CPU-only), assets/data bundled, icon.
+   - **Android APK** (`scripts/build_android.py`): Chaquopy bridge, buildozer spec, test on host Android Studio.
+4. **Settings dialog** — `QDialog` для путей (db, model), `temperature`, `max_tokens`, `top_k` вместо CLI-аргументов; persist в `~/.engineer-companion/settings.json`.
+5. **Export chat** — меню «Файл → Экспорт в Markdown» с вопросами, ответами, источниками; сохранить `.md` + `.json` backup.
 
 ## Constraints
 - No cloud (Qdrant/Pinecone disallowed).

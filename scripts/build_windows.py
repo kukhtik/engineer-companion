@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-EXCLUDES = ["torch", "torchvision", "torchaudio", "tensorflow", "keras"]  # keep binary small
+EXCLUDES = ["torchvision", "torchaudio", "tensorflow", "keras"]  # torch stays — sentence-transformers needs it
 
 
 def build() -> None:
@@ -22,7 +22,7 @@ def build() -> None:
     cmd = [
         sys.executable, "-m", "PyInstaller",
         "--name", "EngineerCompanion",
-        "--onefile",
+        "--onedir",
         "--windowed",
         "--clean",
         "--noconfirm",
@@ -30,10 +30,18 @@ def build() -> None:
         "--hidden-import", "llama_cpp",
         "--hidden-import", "lancedb",
         "--hidden-import", "PySide6",
+        "--hidden-import", "structlog",
+        "--hidden-import", "pymupdf",
+        "--hidden-import", "numpy",
         "--add-data", f"{REPO / 'assets'}:assets",
         "--add-data", f"{REPO / 'core'}:core",
         "--add-data", f"{REPO / 'design'}:design",
         "--add-data", f"{REPO / 'windows'}:windows",
+        "--add-data", f"{REPO / 'docs'}:docs",
+        "--exclude-module", "torchvision",
+        "--exclude-module", "torchaudio",
+        "--exclude-module", "tensorflow",
+        "--exclude-module", "keras",
         str(REPO / "windows" / "main_window.py"),
     ]
     for ex in EXCLUDES:
