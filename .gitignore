@@ -12,3 +12,5 @@ assets/db/*.lance
 .DS_Store
 *.spec
 *.log
+.idea/
+*.iml
