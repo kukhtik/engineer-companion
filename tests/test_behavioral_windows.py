@@ -114,6 +114,26 @@ class TestUserSearchFlow:
         # muted is indicated by objectName "muted"
         assert window.meta_label.objectName() == "muted"
 
+    def test_clear_button_exists_and_triggers_history_clear(self, app, window):
+        # isolating: clear pre-existing history first
+        window.history.clear()
+        app.processEvents()
+
+        btn = window.clear_btn
+        assert btn.isVisible() is True
+        assert "Очистить" in btn.text()
+
+        # inject a fake history entry
+        window.history.add("q", "a", [])
+        app.processEvents()
+        assert len(window.history.entries) == 1
+
+        QTest.mouseClick(btn, Qt.MouseButton.LeftButton)
+        app.processEvents()
+
+        assert len(window.history.entries) == 0
+        assert "История очищена" in window.chat_log.toPlainText()
+
 
 class TestBookmarks:
     """Star / unstar history entries via QTextBrowser anchor clicks."""
@@ -165,9 +185,12 @@ class TestUIWithMockPipeline:
             QTest.keyClicks(search, "what is interlock")
             app.processEvents()
             QTest.mouseClick(w.search_btn, Qt.MouseButton.LeftButton)
-            # Give thread time to finish (no sleep; poll events)
-            for _ in range(20):
+
+            # Poll until worker finishes and is cleaned up
+            for _ in range(200):
                 app.processEvents()
+                if w.worker is None:
+                    break
 
             assert w.results_list.count() > 0
             first = w.results_list.item(0).text()

@@ -90,6 +90,10 @@ class ChatHistory:
         with self.path.open("w", encoding="utf-8") as f:
             json.dump(self.entries, f, ensure_ascii=False, indent=2)
 
+    def clear(self) -> None:
+        self.entries = []
+        self.save()
+
     def format_html(self) -> str:
         parts = []
         for i, e in enumerate(self.entries):
@@ -169,7 +173,11 @@ class CompanionWindow(QMainWindow):
 
         self.meta_label = QLabel()
         self.meta_label.setObjectName("muted")
+
+        self.clear_btn = QPushButton("🗑 Очистить историю")
+        self.clear_btn.clicked.connect(self._on_clear_history)
         left_v.addWidget(self.meta_label)
+        left_v.addWidget(self.clear_btn)
 
         # ---- Right area: chat splitter ----
         right = QSplitter(Qt.Vertical)
@@ -279,6 +287,15 @@ class CompanionWindow(QMainWindow):
             idx = int(url.host())
             self.history.toggle_bookmark(idx)
             self.chat_log.setHtml(self.history.format_html())
+
+    def _on_clear_history(self) -> None:
+        self.history.clear()
+        self.chat_log.setHtml(
+            '<div style="color:#7A7A7A;">'
+            "История очищена.<br>"
+            "Введите вопрос слева и нажмите Найти."
+            "</div>"
+        )
 
 
 def main() -> None:
