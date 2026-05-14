@@ -128,6 +128,8 @@ class RAGQueryPipeline:
         rerank_model: str = "",
         max_tokens: int = 512,
         temperature: float = 0.3,
+        llm_n_ctx: int = 4096,
+        llm_n_threads: int | None = None,
     ) -> None:
         self.retriever = Retriever(
             db_path=db_path,
@@ -137,6 +139,8 @@ class RAGQueryPipeline:
         )
         self.builder = PromptBuilder()
         self.llm_model_path = llm_model_path
+        self.llm_n_ctx = llm_n_ctx
+        self.llm_n_threads = llm_n_threads
         self.max_tokens = max_tokens
         self.temperature = temperature
         self._llm = None
@@ -151,8 +155,8 @@ class RAGQueryPipeline:
         logger.info("loading_llm", model=str(self.llm_model_path))
         self._llm = Llama(
             model_path=str(self.llm_model_path),
-            n_ctx=4096,
-            n_threads=None,  # auto
+            n_ctx=self.llm_n_ctx,
+            n_threads=self.llm_n_threads,
             verbose=False,
         )
         return self._llm
@@ -207,6 +211,8 @@ if __name__ == "__main__":
     pipeline = RAGQueryPipeline(
         db_path=args.db_path,
         llm_model_path=args.llm_path if args.llm_path.exists() else None,
+        llm_n_ctx=2048,
+        llm_n_threads=2,
     )
     query = " ".join(args.query)
     result = pipeline.ask(query)

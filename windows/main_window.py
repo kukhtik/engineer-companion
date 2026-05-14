@@ -16,9 +16,9 @@ from typing import Any
 
 from PySide6.QtCore import Qt, QThread, Signal, QUrl
 from PySide6.QtWidgets import (
-    QApplication, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QMainWindow, QPushButton, QTextBrowser,
-    QSplitter, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
+    QListWidget, QListWidgetItem, QMainWindow, QMenuBar, QMessageBox,
+    QPushButton, QTextBrowser, QSplitter, QVBoxLayout, QWidget,
 )
 
 # Allow running from repo root without install
@@ -27,6 +27,7 @@ sys.path.insert(0, str(_REPO))
 
 from core.query import RAGQueryPipeline  # noqa: E402
 from design.tokens import DribbbleDarkQt  # noqa: E402
+from windows.settings_dialog import SettingsDialog, load_settings, save_settings  # noqa: E402
 
 
 def _markdownish_to_html(text: str) -> str:
@@ -112,9 +113,17 @@ class ChatHistory:
         """Auto-prune without explicit call in add()."""
         self.prune()
 
-    def format_html(self) -> str:
+    def format_html(self, bookmarks_only: bool = False, search_term: str = "") -> str:
         parts = []
         for i, e in enumerate(self.entries):
+            if bookmarks_only and not e.get("bookmarked", False):
+                continue
+            if search_term:
+                q = e.get("query", "").lower()
+                a = e.get("answer", "").lower()
+                st = search_term.lower()
+                if st not in q and st not in a:
+                    continue
             star = "★" if e.get("bookmarked") else "☆"
             parts.append(
                 f'<hr><div style="color:#7A7A7A;font-size:12px;margin-bottom:4px;">'
@@ -158,9 +167,96 @@ class CompanionWindow(QMainWindow):
         self.history = ChatHistory(Path.home() / ".engineer-companion" / "history.json")
         self.setWindowTitle("Engineer Companion")
         self.setMinimumSize(1200, 800)
+        self.settings = load_settings()
+        self._setup_menu()
         self._build_ui()
         self._apply_tokens()
         self._restore_history()
+
+    def _setup_menu(self) -> None:
+        menubar = self.menuBar()
+
+        file_menu = menubar.addMenu("Файл")
+        export_action = file_menu.addAction("Экспорт в Markdown...")
+        export_action.triggered.connect(self._on_export_chat)
+        file_menu.addSeparator()
+        settings_action = file_menu.addAction("Настройки...")
+        settings_action.triggered.connect(self._on_open_settings)
+        settings_action.setShortcut("Ctrl+,")
+
+    def _on_open_settings(self) -> None:
+        dlg = SettingsDialog(self, current=self.settings)
+        if dlg.exec():
+            self.settings = dlg.get_settings()
+            # Rebuild pipeline if settings changed
+            db_path = self.settings.get("db_path")
+            llm_path = self.settings.get("llm_model_path")
+            if db_path:
+                p = Path(db_path)
+                if not p.exists():
+                    db_path = ""
+            if llm_path:
+                p = Path(llm_path)
+                if not p.exists():
+                    llm_path = ""
+
+            from core.query import RAGQueryPipeline
+            if llm_path:
+                try:
+                    self.pipeline = RAGQueryPipeline(
+                        db_path=Path(db_path) if db_path else _REPO / "assets" / "db" / "engineer.db",
+                        llm_model_path=Path(llm_path) if llm_path else None,
+                        top_k=self.settings.get("top_k", 8),
+                        max_tokens=self.settings.get("max_tokens", 512),
+                        temperature=self.settings.get("temperature", 0.3),
+                        llm_n_ctx=2048,
+                        llm_n_threads=2,
+                    )
+                except Exception as exc:
+                    from PySide6.QtWidgets import QMessageBox
+                    QMessageBox.warning(self, "Ошибка", f"Не удалось загрузить модель:\n{exc}")
+                    self.pipeline = None
+            else:
+                self.pipeline = None
+
+    def _on_export_chat(self) -> None:
+        if not self.history.entries:
+            QMessageBox.information(self, "Экспорт", "Нет записей для экспорта.")
+            return
+        bookmarks_only = self.bookmarks_cb.isChecked() if hasattr(self, "bookmarks_cb") else False
+        search_term = self.history_search.text().strip() if hasattr(self, "history_search") else ""
+        entries = self.history.entries
+        if bookmarks_only or search_term:
+            entries = [
+                e for e in entries
+                if (not bookmarks_only or e.get("bookmarked", False))
+                and (not search_term or search_term.lower() in e.get("query", "").lower()
+                     or search_term.lower() in e.get("answer", "").lower())
+            ]
+        from PySide6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Сохранить чат как Markdown", "engineer-companion-chat.md",
+            "Markdown (*.md);;JSON (*.json);;Все файлы (*)"
+        )
+        if not path:
+            return
+        ext = Path(path).suffix.lower()
+        if ext == ".json":
+            import json
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(entries, f, ensure_ascii=False, indent=2)
+        else:
+            lines = ["# Engineer Companion — Экспорт чата\n"]
+            for e in entries:
+                star = "★" if e.get("bookmarked") else " "
+                lines.append(f"## {star} Вопрос: {e['query']}\n")
+                lines.append(f"{e['answer']}\n")
+                for src in e.get("sources", []):
+                    lines.append(f"- {src['source']}, стр.{src['page']} — {src['section']}\n")
+                lines.append("\n")
+            with open(path, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+        QMessageBox.information(self, "Экспорт", f"Сохранено: {path} ({len(entries)} записей)")
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -205,6 +301,25 @@ class CompanionWindow(QMainWindow):
         # ---- Right area: chat splitter ----
         right = QSplitter(Qt.Vertical)
 
+        # Top: chat log + controls
+        chat_top = QWidget()
+        chat_top_v = QVBoxLayout(chat_top)
+        chat_top_v.setContentsMargins(0, 0, 0, 0)
+        chat_top_v.setSpacing(4)
+
+        # Filters row
+        filter_row = QHBoxLayout()
+        filter_row.setContentsMargins(0, 0, 0, 0)
+        self.bookmarks_cb = QCheckBox("★ Только избранное")
+        self.bookmarks_cb.toggled.connect(self._refresh_chat_log)
+        filter_row.addWidget(self.bookmarks_cb)
+
+        self.history_search = QLineEdit()
+        self.history_search.setPlaceholderText("Поиск по истории...")
+        self.history_search.textChanged.connect(self._refresh_chat_log)
+        filter_row.addWidget(self.history_search, stretch=1)
+        chat_top_v.addLayout(filter_row)
+
         self.chat_log = QTextBrowser()
         self.chat_log.setOpenExternalLinks(False)
         self.chat_log.anchorClicked.connect(self._on_anchor_clicked)
@@ -214,7 +329,8 @@ class CompanionWindow(QMainWindow):
             "Введите вопрос слева и нажмите Найти."
             "</div>"
         )
-        right.addWidget(self.chat_log)
+        chat_top_v.addWidget(self.chat_log, stretch=1)
+        right.addWidget(chat_top)
 
         bottom = QWidget()
         bottom_h = QHBoxLayout(bottom)
@@ -327,6 +443,15 @@ class CompanionWindow(QMainWindow):
         self.chat_log.append(
             f'<div style="color:#7A7A7A;">Удалено {old - new} старых записей. Осталось: {new}</div>'
         )
+
+    def _refresh_chat_log(self) -> None:
+        bookmarks_only = self.bookmarks_cb.isChecked()
+        search_term = self.history_search.text().strip()
+        html = self.history.format_html(bookmarks_only=bookmarks_only, search_term=search_term)
+        if html:
+            self.chat_log.setHtml(html)
+        else:
+            self.chat_log.setHtml('<div style="color:#7A7A7A;">Нет записей, соответствующих фильтру.</div>')
 
 
 def main() -> None:
