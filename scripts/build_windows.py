@@ -2,30 +2,37 @@
 
 Run on Windows:
     python scripts/build_windows.py
+    python scripts/build_windows.py --console   # debug build (visible errors)
+    python scripts/build_windows.py --clean     # fresh rebuild
 
 Prerequisites:
-    pip install pyinstaller PySide6 sentence-transformers llama-cpp-python lancedb
+    pip install pyinstaller PySide6 sentence-transformers llama-cpp-python lancedb pymupdf
 """
+
 from __future__ import annotations
 
 import subprocess
 import sys
 from pathlib import Path
+from typing import NoReturn
 
 REPO = Path(__file__).resolve().parents[1]
 PYTHON = sys.executable
 
-EXCLUDES = [
-    "torchvision", "torchaudio", "tensorflow", "keras",
-    "matplotlib", "scipy", "pandas", "scikit_learn",
-    "Cython", "setuptools", "pip", "wheel",
-]
+# --------------- config ---------------
+APP_NAME = "EngineerCompanion"
+ENTRY_POINT = "windows/main_window.py"
 
 HIDDEN_IMPORTS = [
+    "PySide6",
+    "PySide6.QtCore",
+    "PySide6.QtGui",
+    "PySide6.QtWidgets",
+    "PySide6.QtNetwork",
+    "shiboken6",
     "sentence_transformers",
     "llama_cpp",
     "lancedb",
-    "PySide6",
     "structlog",
     "pymupdf",
     "numpy",
@@ -39,47 +46,230 @@ HIDDEN_IMPORTS = [
     "design.tokens",
 ]
 
+EXCLUDES = [
+    "torchvision", "torchaudio",
+    "tensorflow", "keras",
+    "matplotlib", "scipy", "pandas", "scikit_learn",
+    "Cython", "setuptools", "pip", "wheel",
+    "pytest", "unittest",
+]
+
 DATA_DIRS = ["assets", "core", "design", "windows", "docs"]
 
+REQUIRED_PACKAGES = [
+    "PySide6", "llama_cpp", "sentence_transformers",
+    "lancedb", "structlog", "pymupdf", "numpy", "pyarrow",
+    "pydantic", "tiktoken",
+]
+# --------------------------------------
 
-def build() -> None:
+
+def die(msg: str) -> NoReturn:
+    print(f"FATAL: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+_PACKAGE_IMPORT_MAP = {
+    "llama-cpp-python": "llama_cpp",
+    "sentence-transformers": "sentence_transformers",
+    "PySide6": "PySide6",
+    "lancedb": "lancedb",
+    "structlog": "structlog",
+    "pymupdf": "pymupdf",
+    "numpy": "numpy",
+    "pyarrow": "pyarrow",
+    "pydantic": "pydantic",
+    "tiktoken": "tiktoken",
+}
+
+def check_deps() -> None:
+    """Check each dependency in an isolated subprocess to avoid DLL conflicts
+    (e.g. llama_cpp + sentence_transformers both loading torch in one process)."""
+    missing_pip: list[str] = []
+    for pip_name, import_name in _PACKAGE_IMPORT_MAP.items():
+        result = subprocess.run(
+            [PYTHON, "-c", f"import {import_name}"],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            print(f"  {pip_name} OK")
+        else:
+            err = result.stderr.strip().split("\n")[-1] if result.stderr.strip() else "unknown"
+            print(f"  {pip_name} MISSING: {err}")
+            missing_pip.append(pip_name)
+
+    if not missing_pip:
+        print("  All dependencies OK")
+        return
+
+    print(f"Missing packages: {', '.join(missing_pip)}")
+    # Clean any stale partial downloads
+    for pkg in missing_pip:
+        subprocess.run(
+            [PYTHON, "-m", "pip", "cache", "remove", pkg],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+
+    # Install one at a time — heavy packages (llama-cpp-python) time out in batch
+    for pip_name in missing_pip:
+        print(f"Installing {pip_name}...")
+        result = subprocess.run(
+            [PYTHON, "-m", "pip", "install", pip_name],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            die(f"Cannot install {pip_name}. Run manually:\n  pip install {pip_name}")
+        print(f"  {pip_name} ✓")
+
+    print("Re-checking...")
+    for pip_name, import_name in _PACKAGE_IMPORT_MAP.items():
+        result = subprocess.run(
+            [PYTHON, "-c", f"import {import_name}"],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            die(f"Still missing after install: {pip_name}")
+
+
+def ensure_pyinstaller() -> None:
     try:
         import PyInstaller  # noqa: F401
     except ImportError:
-        print("Install PyInstaller: pip install pyinstaller")
-        sys.exit(1)
+        die("Install PyInstaller: pip install pyinstaller")
 
-    cmd = [
-        str(PYTHON), "-m", "PyInstaller",
-        "--name", "EngineerCompanion",
-        "--onedir",
-        "--windowed",
-        "--clean",
-        "--noconfirm",
-    ]
 
-    for mod in HIDDEN_IMPORTS:
-        cmd.extend(["--hidden-import", mod])
+def generate_spec(console: bool = False) -> Path:
+    """Generate a fresh .spec file with correct repo-relative paths."""
+    spec_path = REPO / f"{APP_NAME}.spec"
 
-    for mod in EXCLUDES:
-        cmd.extend(["--exclude-module", mod])
-
+    datas = []
     for d in DATA_DIRS:
         src = REPO / d
-        cmd.extend(["--add-data", f"{src}:{d}"])
+        if src.exists():
+            datas.append((str(src), d))
 
-    cmd.append(str(REPO / "windows" / "main_window.py"))
+    # Build the spec content
+    datas_repr = ",\n        ".join(repr(d) for d in datas)
+    hidden_repr = ",\n        ".join(repr(h) for h in HIDDEN_IMPORTS)
+    excludes_repr = ",\n        ".join(repr(e) for e in EXCLUDES)
+
+    entry = str(REPO / ENTRY_POINT)
+
+    spec = f'''# -*- mode: python ; coding: utf-8 -*-
+# Auto-generated by scripts/build_windows.py
+
+a = Analysis(
+    [{entry!r}],
+    pathex=[{str(REPO)!r}],
+    binaries=[],
+    datas=[
+        {datas_repr},
+    ],
+    hiddenimports=[
+        {hidden_repr},
+    ],
+    hookspath=[],
+    hooksconfig={{}},
+    runtime_hooks=[],
+    excludes=[
+        {excludes_repr},
+    ],
+    noarchive=False,
+    optimize=0,
+)
+pyz = PYZ(a.pure)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name={APP_NAME!r},
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    console={console!r},
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+)
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name={APP_NAME!r},
+)
+'''
+    spec_path.write_text(spec, encoding="utf-8")
+    return spec_path
+
+
+def run_pyinstaller(spec: Path, clean: bool) -> None:
+    cmd = [PYTHON, "-m", "PyInstaller", "--noconfirm"]
+    if clean:
+        cmd.append("--clean")
+    cmd.append(str(spec))
 
     print("Running PyInstaller...")
-    print("  Command:", " ".join(str(c) for c in cmd))
+    print("  Command:", " ".join(cmd))
     print()
     subprocess.run(cmd, cwd=REPO, check=True)
 
-    out_dir = REPO / "dist" / "EngineerCompanion"
-    print(f"\nBuild complete: {out_dir}")
+
+def verify_output() -> None:
+    out = REPO / "dist" / APP_NAME / f"{APP_NAME}.exe"
+    internal = REPO / "dist" / APP_NAME / "_internal"
+
+    if not out.exists():
+        die(f"Output .exe not found: {out}")
+
+    # Check PySide6 is bundled
+    pyside_dir = internal / "PySide6"
+    if not pyside_dir.exists():
+        die("PySide6 NOT bundled — rebuild with --clean")
+
+    print(f"\n✓ Build OK: {out}")
+    print(f"  PySide6 bundled: {pyside_dir}")
+    print(f"  Size: {out.stat().st_size // 1024 // 1024} MB")
+
+
+def main() -> None:
+    console = "--console" in sys.argv
+    clean = "--clean" in sys.argv
+
+    print(f"Repo: {REPO}")
+    print(f"Python: {PYTHON}")
+    print(f"Mode: {'console' if console else 'windowed'}{', clean' if clean else ''}")
+    print()
+
+    print("[1/5] Checking dependencies...")
+    check_deps()
+
+    print("[2/5] Checking PyInstaller...")
+    ensure_pyinstaller()
+
+    print("[3/5] Generating spec...")
+    spec = generate_spec(console=console)
+    print(f"  Spec: {spec}")
+
+    print("[4/5] Running PyInstaller...")
+    try:
+        run_pyinstaller(spec, clean=clean)
+    except subprocess.CalledProcessError as e:
+        die(f"PyInstaller failed (exit {e.returncode}): {e}")
+
+    print("[5/5] Verifying output...")
+    verify_output()
+
     print("\nTo test:")
-    print(f"  {out_dir / 'EngineerCompanion.exe'}")
+    print(f"  {REPO / 'dist' / APP_NAME / f'{APP_NAME}.exe'}")
 
 
 if __name__ == "__main__":
-    build()
+    main()
