@@ -1,5 +1,6 @@
 plugins {
     id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
     id 'com.chaquo.python'
 }
 
@@ -18,14 +19,9 @@ android {
             abiFilters "arm64-v8a"
         }
 
-        // Chaquopy config
         python {
             version "3.11"
-            buildPython System.getenv("PYTHON_3_11") ?: "python3.11"
-
             pip {
-                install "sentence-transformers==3.0.1"
-                install "lancedb==0.12.0"
                 install "numpy==1.26.4"
                 install "pyarrow==15.0.2"
                 install "structlog==24.4.0"
@@ -36,7 +32,6 @@ android {
     buildTypes {
         release {
             minifyEnabled false
-            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
     }
 
@@ -56,49 +51,14 @@ android {
     composeOptions {
         kotlinCompilerExtensionVersion '1.5.15'
     }
-
-    // JNI + llama.cpp via CMake
-    externalNativeBuild {
-        cmake {
-            path "src/main/cpp/CMakeLists.txt"
-            version "3.22.1"
-        }
-    }
-
-    // Prebuilt .so files location
-    sourceSets {
-        main {
-            jniLibs.srcDirs = ['src/main/jniLibs']
-        }
-    }
 }
 
 dependencies {
     implementation 'androidx.core:core-ktx:1.13.1'
     implementation 'androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.4'
-    implementation 'androidx.lifecycle:lifecycle-viewmodel-compose:2.8.4'
     implementation 'androidx.activity:activity-compose:1.9.1'
-
-    // Compose BOM
     implementation platform('androidx.compose:compose-bom:2024.06.00')
     implementation 'androidx.compose.ui:ui'
-    implementation 'androidx.compose.ui:ui-graphics'
     implementation 'androidx.compose.material3:material3'
-    implementation 'androidx.compose.material:material-icons-extended'
-
-    // Coroutines
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1'
 }
-
-// Copy assets from host repo
-task copyAssets(type: Copy) {
-    from rootProject.projectDir.parent + '/assets/db/'
-    into 'src/main/assets/db/'
-}
-
-task copyPythonCore(type: Copy) {
-    from rootProject.projectDir.parent + '/core/'
-    into 'src/main/python/core/'
-}
-
-preBuild.dependsOn copyAssets, copyPythonCore
