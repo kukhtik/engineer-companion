@@ -1,8 +1,5 @@
-package com.varian.engcomp
+package com.varian.engcomp.model
 
-/**
- * Search result data class from Python Chaquopy bridge.
- */
 data class SearchResult(
     val text: String,
     val source: String,
