@@ -1,0 +1,404 @@
+"""OCR Dialog — in-app OCR management panel."""
+
+import os
+import time
+from pathlib import Path
+from typing import Optional
+
+from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QProgressBar, QTableWidget, QTableWidgetItem, QComboBox,
+    QGroupBox, QWidget, QSizePolicy, QHeaderView, QMessageBox,
+    QApplication,
+)
+
+import sys
+_REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_REPO))
+
+from design.tokens import DribbbleDarkQt
+
+DOCS_DIR = Path(__file__).resolve().parents[1] / "docs"
+CACHE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "ocr_cache.jsonl"
+
+# All 12 known PDFs
+_ALL_DOCS = [
+    "TrueBeam 3.0 Volume 1 Field Service Databook.pdf",
+    "TrueBeam 3.0 Volume 2 Field Service Databook.pdf",
+    "TrueBeam Administrators Guide.pdf",
+    "TrueBeam IEC Functional Performance Characteristics.pdf",
+    "TrueBeam IEC Site Tests.pdf",
+    "TrueBeam Machine Performance Check Reference Guide.pdf",
+    "TrueBeam Periodic Maintenance Inspection Guide.pdf",
+    "Visual Coaching Device (VCD) Instructions for Use.pdf",
+    "VitalBeam Administrators Guide.pdf",
+    "VitalBeam Instructions for Use.pdf",
+    "VitalBeam Technical Reference Guide—Volume 1.pdf",
+    "VitalBeam Technical Reference Guide—Volume 2- Imaging.pdf",
+]
+
+
+class OcrWorker(QThread):
+    """Background thread for running OCR on a single document."""
+
+    progress = Signal(dict)
+    finished = Signal(dict)
+    error = Signal(str)
+
+    def __init__(self, doc_path: Path, cache_path: Path, stop_flag: list) -> None:
+        super().__init__()
+        self._doc_path = doc_path
+        self._cache_path = cache_path
+        self._stop_flag = stop_flag  # mutable list [False], Stop sets [0]=True
+
+    def _emit_progress(self, event: dict) -> None:
+        self.progress.emit(event)
+
+    def _check_stop(self) -> bool:
+        return bool(self._stop_flag[0])
+
+    def run(self) -> None:
+        try:
+            from scripts.ocr_databooks import run_ocr
+            summary = run_ocr(
+                doc_path=self._doc_path,
+                cache_path=self._cache_path,
+                progress_callback=self._emit_progress,
+                should_stop=self._check_stop,
+            )
+            self.finished.emit(summary)
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
+class ReindexWorker(QThread):
+    """Background thread for re-indexing a document into the vector store."""
+
+    finished = Signal(str)
+    error = Signal(str)
+
+    def __init__(self, pdf_path: Path, ocr_cache: Path) -> None:
+        super().__init__()
+        self._pdf_path = pdf_path
+        self._ocr_cache = ocr_cache
+
+    def run(self) -> None:
+        try:
+            from core.indexer import DocumentIndexPipeline, PdfTextExtractor, Chunker
+            pipeline = DocumentIndexPipeline(
+                extractor=PdfTextExtractor(),
+                chunker=Chunker(),
+                db_path=_REPO / "assets" / "db" / "engineer.db",
+            )
+            pipeline.index_pdf_with_ocr(self._pdf_path, self._ocr_cache)
+            self.finished.emit(str(self._pdf_path.name))
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
+class OCRDialog(QDialog):
+    """In-app OCR management panel."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("OCR — Управление индексацией")
+        self.setMinimumSize(900, 680)
+
+        self._ocr_worker: Optional[OcrWorker] = None
+        self._reindex_worker: Optional[ReindexWorker] = None
+        self._stop_flag: list = [False]
+        self._stats_cache: list = []
+
+        self._build_ui()
+        self._apply_style()
+        self._refresh_stats()
+
+    # ------------------------------------------------------------------
+    # UI construction
+    # ------------------------------------------------------------------
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(12)
+
+        # ---- Section 1: document selector ----
+        doc_group = QGroupBox("Выберите документ")
+        doc_v = QVBoxLayout(doc_group)
+        doc_v.setSpacing(6)
+
+        self.doc_combo = QComboBox()
+        self.doc_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        doc_v.addWidget(self.doc_combo)
+        root.addWidget(doc_group)
+
+        # ---- Section 2: OCR progress ----
+        prog_group = QGroupBox("Прогресс OCR")
+        prog_v = QVBoxLayout(prog_group)
+        prog_v.setSpacing(6)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setMinimum(0)
+        self.progress_bar.setMaximum(100)
+        self.progress_bar.setValue(0)
+        prog_v.addWidget(self.progress_bar)
+
+        self.page_label = QLabel("Страница — / —")
+        prog_v.addWidget(self.page_label)
+
+        self.stats_label = QLabel("Нативных: — | OCR: — | Прошло: — | ETA: —")
+        prog_v.addWidget(self.stats_label)
+
+        self.status_label = QLabel("")
+        self.status_label.setWordWrap(True)
+        prog_v.addWidget(self.status_label)
+
+        # Buttons row
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+
+        self.run_btn = QPushButton("Запустить OCR")
+        self.run_btn.clicked.connect(self._on_run_ocr)
+        btn_row.addWidget(self.run_btn)
+
+        self.stop_btn = QPushButton("Стоп")
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.clicked.connect(self._on_stop)
+        btn_row.addWidget(self.stop_btn)
+
+        self.reindex_btn = QPushButton("Переиндексировать")
+        self.reindex_btn.setEnabled(False)
+        self.reindex_btn.clicked.connect(self._on_reindex)
+        btn_row.addWidget(self.reindex_btn)
+
+        btn_row.addStretch()
+        prog_v.addLayout(btn_row)
+        root.addWidget(prog_group)
+
+        # ---- Section 3: all-docs status table ----
+        table_group = QGroupBox("Состояние всех документов")
+        table_v = QVBoxLayout(table_group)
+        table_v.setSpacing(6)
+
+        self.stats_table = QTableWidget(0, 6)
+        self.stats_table.setHorizontalHeaderLabels([
+            "Документ", "Стр.", "Кэш", "Нативных", "OCR", "% Готово"
+        ])
+        self.stats_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        for col in range(1, 6):
+            self.stats_table.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeToContents)
+        self.stats_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.stats_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.stats_table.verticalHeader().setVisible(False)
+        table_v.addWidget(self.stats_table)
+
+        refresh_btn = QPushButton("Обновить")
+        refresh_btn.clicked.connect(self._refresh_stats)
+        table_v.addWidget(refresh_btn)
+
+        root.addWidget(table_group, stretch=1)
+
+    def _apply_style(self) -> None:
+        tokens = DribbbleDarkQt()
+        self.setStyleSheet(tokens.as_stylesheet())
+
+    # ------------------------------------------------------------------
+    # Stats and combo population
+    # ------------------------------------------------------------------
+
+    def _refresh_stats(self) -> None:
+        """Load stats from cache and update table + combobox."""
+        try:
+            from scripts.ocr_databooks import ocr_stats
+            stats = ocr_stats(DOCS_DIR, CACHE_PATH)
+        except Exception:
+            stats = []
+
+        # Merge with known docs list so all 12 always appear
+        stats_by_name = {s['filename']: s for s in stats}
+        merged = []
+        for name in _ALL_DOCS:
+            if name in stats_by_name:
+                merged.append(stats_by_name[name])
+            else:
+                merged.append({
+                    'filename': name,
+                    'total_pages': 0,
+                    'cached_pages': 0,
+                    'native_pages': 0,
+                    'ocr_pages': 0,
+                    'percent_done': 0.0,
+                    'is_scan_heavy': 'Databook' in name,
+                })
+        self._stats_cache = merged
+
+        # Populate table
+        self.stats_table.setRowCount(len(merged))
+        for row, s in enumerate(merged):
+            prefix = "⚠ " if s['is_scan_heavy'] else ""
+            self.stats_table.setItem(row, 0, QTableWidgetItem(prefix + s['filename']))
+            self.stats_table.setItem(row, 1, QTableWidgetItem(str(s['total_pages'])))
+            self.stats_table.setItem(row, 2, QTableWidgetItem(str(s['cached_pages'])))
+            self.stats_table.setItem(row, 3, QTableWidgetItem(str(s['native_pages'])))
+            self.stats_table.setItem(row, 4, QTableWidgetItem(str(s['ocr_pages'])))
+            pct = f"{s['percent_done']:.1f}%"
+            self.stats_table.setItem(row, 5, QTableWidgetItem(pct))
+
+        # Repopulate combobox preserving current selection
+        current_text = self.doc_combo.currentText()
+        self.doc_combo.blockSignals(True)
+        self.doc_combo.clear()
+        for s in merged:
+            prefix = "⚠ " if s['is_scan_heavy'] else ""
+            label = (
+                f"{prefix}{s['filename']} "
+                f"[{s['percent_done']:.0f}% кэш, {s['cached_pages']}/{s['total_pages']} стр.]"
+            )
+            self.doc_combo.addItem(label)
+        self.doc_combo.blockSignals(False)
+
+        # Restore previous selection if possible
+        for i in range(self.doc_combo.count()):
+            if self.doc_combo.itemText(i) == current_text:
+                self.doc_combo.setCurrentIndex(i)
+                break
+
+        self._update_reindex_btn()
+
+    def _current_stat(self) -> Optional[dict]:
+        idx = self.doc_combo.currentIndex()
+        if 0 <= idx < len(self._stats_cache):
+            return self._stats_cache[idx]
+        return None
+
+    def _update_reindex_btn(self) -> None:
+        stat = self._current_stat()
+        has_cache = stat is not None and stat['cached_pages'] > 0
+        self.reindex_btn.setEnabled(has_cache and self._ocr_worker is None)
+
+    # ------------------------------------------------------------------
+    # OCR actions
+    # ------------------------------------------------------------------
+
+    def _on_run_ocr(self) -> None:
+        stat = self._current_stat()
+        if stat is None:
+            return
+
+        doc_path = DOCS_DIR / stat['filename']
+        if not doc_path.exists():
+            QMessageBox.warning(
+                self, "Файл не найден",
+                f"PDF не найден:\n{doc_path}"
+            )
+            return
+
+        self._stop_flag = [False]
+        self._ocr_worker = OcrWorker(doc_path, CACHE_PATH, self._stop_flag)
+        self._ocr_worker.progress.connect(self._on_progress)
+        self._ocr_worker.finished.connect(self._on_ocr_finished)
+        self._ocr_worker.error.connect(self._on_ocr_error)
+
+        self.run_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
+        self.reindex_btn.setEnabled(False)
+        self.progress_bar.setValue(0)
+        self.page_label.setText("Страница 0 / ?")
+        self.stats_label.setText("Нативных: 0 | OCR: 0 | Прошло: 0s | ETA: —")
+        self.status_label.setText(f"Запущен OCR: {stat['filename']}")
+
+        self._ocr_worker.start()
+
+    def _on_stop(self) -> None:
+        self._stop_flag[0] = True
+        self.stop_btn.setEnabled(False)
+        self.status_label.setText("Останавливаем OCR...")
+
+    def _on_progress(self, event: dict) -> None:
+        total = event.get('total_pages', 0)
+        done = event.get('done_count', 0)
+        elapsed = event.get('elapsed_s', 0.0)
+        native = event.get('native_count', 0)
+        ocr = event.get('ocr_count', 0)
+
+        self.progress_bar.setMaximum(max(total, 1))
+        self.progress_bar.setValue(done)
+        self.page_label.setText(f"Страница {done} / {total}")
+
+        if done > 0 and elapsed > 0:
+            eta = elapsed / done * (total - done)
+            eta_str = f"{eta:.0f}s"
+        else:
+            eta_str = "—"
+
+        self.stats_label.setText(
+            f"Нативных: {native} | OCR: {ocr} | Прошло: {elapsed:.0f}s | ETA: {eta_str}"
+        )
+
+    def _on_ocr_finished(self, summary: dict) -> None:
+        self._ocr_worker = None
+        self.run_btn.setEnabled(True)
+        self.stop_btn.setEnabled(False)
+
+        if summary.get('stopped'):
+            self.status_label.setText(
+                f"OCR остановлен. Обработано: {summary.get('ocr_count', 0) + summary.get('native_count', 0)} стр."
+            )
+        else:
+            self.status_label.setText(
+                f"OCR завершён: {summary.get('doc', '')} — "
+                f"{summary.get('ocr_count', 0)} OCR, {summary.get('native_count', 0)} нативных, "
+                f"за {summary.get('elapsed_s', 0):.1f}s"
+            )
+
+        self._refresh_stats()
+        self._update_reindex_btn()
+
+    def _on_ocr_error(self, msg: str) -> None:
+        self._ocr_worker = None
+        self.run_btn.setEnabled(True)
+        self.stop_btn.setEnabled(False)
+        self.status_label.setText(f"Ошибка OCR: {msg}")
+        QMessageBox.critical(self, "Ошибка OCR", msg)
+
+    # ------------------------------------------------------------------
+    # Re-index actions
+    # ------------------------------------------------------------------
+
+    def _on_reindex(self) -> None:
+        stat = self._current_stat()
+        if stat is None:
+            return
+
+        pdf_path = DOCS_DIR / stat['filename']
+        self._reindex_worker = ReindexWorker(pdf_path, CACHE_PATH)
+        self._reindex_worker.finished.connect(self._on_reindex_finished)
+        self._reindex_worker.error.connect(self._on_reindex_error)
+
+        self.reindex_btn.setEnabled(False)
+        self.run_btn.setEnabled(False)
+        self.status_label.setText(f"Переиндексирование: {stat['filename']}...")
+        self._reindex_worker.start()
+
+    def _on_reindex_finished(self, doc_name: str) -> None:
+        self._reindex_worker = None
+        self.run_btn.setEnabled(True)
+        self.status_label.setText(f"Переиндексирование завершено: {doc_name}")
+        self._update_reindex_btn()
+
+    def _on_reindex_error(self, msg: str) -> None:
+        self._reindex_worker = None
+        self.run_btn.setEnabled(True)
+        self.status_label.setText(f"Ошибка переиндексирования: {msg}")
+        QMessageBox.critical(self, "Ошибка переиндексирования", msg)
+
+    # ------------------------------------------------------------------
+    # Convenience classmethod
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def open_dialog(cls, parent=None) -> "OCRDialog":
+        """Open an OCRDialog and return it (caller should call exec())."""
+        dlg = cls(parent)
+        return dlg

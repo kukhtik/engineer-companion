@@ -183,6 +183,14 @@ class CompanionWindow(QMainWindow):
         settings_action = file_menu.addAction("Настройки...")
         settings_action.triggered.connect(self._on_open_settings)
         settings_action.setShortcut("Ctrl+,")
+        file_menu.addSeparator()
+        ocr_action = file_menu.addAction("OCR и индексация...")
+        ocr_action.triggered.connect(self._on_open_ocr)
+
+    def _on_open_ocr(self) -> None:
+        from windows.ocr_dialog import OCRDialog
+        dlg = OCRDialog(self)
+        dlg.exec()
 
     def _on_open_settings(self) -> None:
         dlg = SettingsDialog(self, current=self.settings)
