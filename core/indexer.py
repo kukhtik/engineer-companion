@@ -119,8 +119,15 @@ class DocumentIndexPipeline:
     def _get_model(self):
         if self._model is None:
             from sentence_transformers import SentenceTransformer
-            logger.info("loading_embedding_model", model=self.embedding_model_name)
-            self._model = SentenceTransformer(self.embedding_model_name, trust_remote_code=True)
+            from android.assets_loader import resolve_bundled_model
+            local = resolve_bundled_model("embedder")
+            if local is not None:
+                model_id = str(local)
+                logger.info("loading_embedding_model_local", path=model_id)
+                self._model = SentenceTransformer(model_id, trust_remote_code=True, local_files_only=True)
+            else:
+                logger.info("loading_embedding_model", model=self.embedding_model_name)
+                self._model = SentenceTransformer(self.embedding_model_name, trust_remote_code=True)
         return self._model
 
     def _get_table(self):

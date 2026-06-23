@@ -61,6 +61,18 @@ def resolve_embedding_model(model_name: str = "intfloat/multilingual-e5-small") 
     return model_name
 
 
+def resolve_bundled_model(subdir: str) -> Path | None:
+    """Return absolute path to a bundled model dir under assets/models/<subdir>.
+
+    Works both in the PyInstaller bundle (where __file__ resolves under _MEIPASS
+    which has assets/ at the same level as core/) and in dev (repo root).
+    Returns None if the directory does not exist.
+    """
+    repo = Path(__file__).resolve().parents[1]
+    p = repo / "assets" / "models" / subdir
+    return p if p.exists() else None
+
+
 def ensure_assets(android_files_dir: Path | None = None) -> dict[str, Path | None]:
     """Diagnostic: verify db and model exist."""
     return {

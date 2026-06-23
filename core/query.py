@@ -44,8 +44,17 @@ class Retriever:
     def _get_model(self):
         if self._model is None:
             from sentence_transformers import SentenceTransformer
-            logger.info("loading_embedding_model", model=self.embedding_model_name)
-            self._model = SentenceTransformer(self.embedding_model_name, trust_remote_code=True)
+            from android.assets_loader import resolve_bundled_model
+            local = resolve_bundled_model("embedder")
+            if local is not None:
+                model_id = str(local)
+                extra: dict = {"local_files_only": True}
+                logger.info("loading_embedding_model_local", path=model_id)
+            else:
+                model_id = self.embedding_model_name
+                extra = {}
+                logger.info("loading_embedding_model", model=model_id)
+            self._model = SentenceTransformer(model_id, trust_remote_code=True, **extra)
         return self._model
 
     def _get_reranker(self):
@@ -53,8 +62,15 @@ class Retriever:
             return None
         if self._reranker is None:
             from sentence_transformers import CrossEncoder
-            logger.info("loading_reranker", model=self.rerank_model_name)
-            self._reranker = CrossEncoder(self.rerank_model_name)
+            from android.assets_loader import resolve_bundled_model
+            local = resolve_bundled_model("reranker")
+            if local is not None:
+                model_id = str(local)
+                logger.info("loading_reranker_local", path=model_id)
+                self._reranker = CrossEncoder(model_id, local_files_only=True)
+            else:
+                logger.info("loading_reranker", model=self.rerank_model_name)
+                self._reranker = CrossEncoder(self.rerank_model_name)
         return self._reranker
 
     def _get_table(self):

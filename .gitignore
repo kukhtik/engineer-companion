@@ -11,6 +11,9 @@ dist/
 build/
 assets/models/*.gguf
 assets/models/*.bin
+assets/models/embedder/
+assets/models/reranker/
+*.safetensors
 assets/db/*.db
 assets/db/*.lance
 .DS_Store
