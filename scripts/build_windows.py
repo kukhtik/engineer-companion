@@ -138,6 +138,31 @@ def ensure_pyinstaller() -> None:
         die("Install PyInstaller: pip install pyinstaller")
 
 
+def _llama_cpp_binaries() -> list[tuple[str, str]]:
+    """Return (src_dll, dest_dir) tuples for all llama_cpp native DLLs."""
+    import glob
+    import importlib.util
+    spec = importlib.util.find_spec("llama_cpp")
+    if spec is None or spec.origin is None:
+        return []
+    pkg_dir = Path(spec.origin).parent
+    lib_dir = pkg_dir / "lib"
+    if not lib_dir.exists():
+        return []
+    dlls = glob.glob(str(lib_dir / "*.dll"))
+    return [(dll, "llama_cpp/lib") for dll in dlls]
+
+
+def _llama_cpp_datas() -> list[tuple[str, str]]:
+    """Return (src, dest) tuples to bundle the full llama_cpp Python package."""
+    import importlib.util
+    spec = importlib.util.find_spec("llama_cpp")
+    if spec is None or spec.origin is None:
+        return []
+    pkg_dir = str(Path(spec.origin).parent)
+    return [(pkg_dir, "llama_cpp")]
+
+
 def generate_spec(console: bool = False) -> Path:
     """Generate a fresh .spec file with correct repo-relative paths."""
     spec_path = REPO / f"{APP_NAME}.spec"
@@ -148,10 +173,17 @@ def generate_spec(console: bool = False) -> Path:
         if src.exists():
             datas.append((str(src), d))
 
+    # Bundle the full llama_cpp Python package so wrapper modules are present.
+    datas.extend(_llama_cpp_datas())
+
+    # Collect llama_cpp native DLLs (llama.dll, ggml*.dll, mtmd.dll, …).
+    llama_binaries = _llama_cpp_binaries()
+
     # Build the spec content
     datas_repr = ",\n        ".join(repr(d) for d in datas)
     hidden_repr = ",\n        ".join(repr(h) for h in HIDDEN_IMPORTS)
     excludes_repr = ",\n        ".join(repr(e) for e in EXCLUDES)
+    binaries_repr = ",\n        ".join(repr(b) for b in llama_binaries)
 
     entry = str(REPO / ENTRY_POINT)
 
@@ -161,7 +193,9 @@ def generate_spec(console: bool = False) -> Path:
 a = Analysis(
     [{entry!r}],
     pathex=[{str(REPO)!r}],
-    binaries=[],
+    binaries=[
+        {binaries_repr},
+    ],
     datas=[
         {datas_repr},
     ],
