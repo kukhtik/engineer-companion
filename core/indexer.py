@@ -321,6 +321,120 @@ class DocumentIndexPipeline:
             self.index_pdf(pdf)
         logger.info("index_build_complete")
 
+    def index_pdf_with_ocr(self, pdf_path: Path, ocr_cache: Path) -> None:
+        """Index a PDF using pre-built OCR cache (from scripts/ocr_databooks.py).
+
+        For each page in the OCR cache:
+        - source=="native": use the native PyMuPDF text as-is
+        - source=="ocr":    use the OCR-recovered text
+
+        Chunks are built with the same Chunker and is_low_quality_chunk filter.
+        OCR-recovered pages are tagged with section prefix "[OCR] " so they are
+        distinguishable in retrieval results.
+
+        Args:
+            pdf_path:  Path to the scanned PDF (used only for its filename as source).
+            ocr_cache: Path to JSONL cache produced by scripts/ocr_databooks.py.
+        """
+        import json as _json
+
+        doc_name = pdf_path.name
+        logger.info("indexing_pdf_with_ocr", path=str(pdf_path), cache=str(ocr_cache))
+
+        if not ocr_cache.exists():
+            logger.error("ocr_cache_not_found", cache=str(ocr_cache))
+            return
+
+        # Load all cache entries for this document, keyed by 0-indexed page number
+        page_entries: dict[int, dict] = {}
+        with ocr_cache.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = _json.loads(line)
+                    if entry.get("doc") == doc_name:
+                        page_entries[int(entry["page"])] = entry
+                except (ValueError, KeyError):
+                    pass
+
+        if not page_entries:
+            logger.warning("no_cache_entries_for_doc", doc=doc_name)
+            return
+
+        logger.info("loaded_ocr_cache", doc=doc_name, pages=len(page_entries))
+
+        all_chunks: list[Chunk] = []
+        for page_idx in sorted(page_entries):
+            entry = page_entries[page_idx]
+            text = entry.get("text", "").strip()
+            if not text:
+                continue
+            source_tag = entry.get("source", "ocr")
+            # 1-indexed page number for consistency with the rest of the pipeline
+            page_num = page_idx + 1
+            # Tag the section so OCR-recovered content is identifiable
+            heading_prefix = "[OCR] " if source_tag == "ocr" else ""
+            for chunk in self.chunker.chunk_paragraph(
+                text, doc_name, page_num, heading_prefix
+            ):
+                all_chunks.append(chunk)
+
+        if not all_chunks:
+            logger.warning("no_chunks_from_ocr_cache", doc=doc_name)
+            return
+
+        if self.drop_low_quality:
+            kept: list[Chunk] = []
+            dropped_count = 0
+            for chunk in all_chunks:
+                if is_low_quality_chunk(chunk.text):
+                    dropped_count += 1
+                else:
+                    kept.append(chunk)
+            logger.info(
+                "quality_filter",
+                path=str(pdf_path),
+                total=len(all_chunks),
+                kept=len(kept),
+                dropped=dropped_count,
+            )
+            chunks = kept
+        else:
+            chunks = all_chunks
+
+        if not chunks:
+            logger.warning("all_chunks_filtered_ocr", path=str(pdf_path))
+            return
+
+        model = self._get_model()
+        texts = [c.text for c in chunks]
+        embeddings = model.encode(
+            texts,
+            show_progress_bar=False,
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+            device="cpu",
+        )
+
+        table = self._get_table()
+        records = []
+        for chunk, emb in zip(chunks, embeddings):
+            rec = {
+                "id": self._compute_hash(chunk),
+                "text": chunk.text,
+                "source": chunk.source,
+                "page": chunk.page,
+                "section": chunk.section,
+                "chunk_index": chunk.chunk_index,
+                "tokens": chunk.tokens_estimate,
+                "vector": emb.tolist(),
+            }
+            records.append(rec)
+        table.add(records)
+        logger.info("pdf_indexed_with_ocr", path=str(pdf_path), chunks=len(records))
+
 
 if __name__ == "__main__":
     import argparse

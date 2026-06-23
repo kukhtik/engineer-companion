@@ -17,12 +17,28 @@
 # torch is CPU-only, installed from:
 #   https://download.pytorch.org/whl/cpu
 #
+# OCR DEPENDENCIES (for scanned TrueBeam Field Service Databooks):
+#   paddleocr==2.8.1, paddlepaddle==2.6.2, opencv-python-headless<4.9
+#   numpy MUST stay at 1.26.4 — paddle 3.x crashes; do NOT upgrade paddlepaddle.
+#   Install after torch (paddle needs numpy <2):
+#     .venv-win\Scripts\pip install paddlepaddle==2.6.2
+#     .venv-win\Scripts\pip install paddleocr==2.8.1
+#     .venv-win\Scripts\pip install "opencv-python-headless<4.9"
+#     .venv-win\Scripts\pip install "numpy==1.26.4"   # re-pin if anything bumps it
+#
 # To recreate this environment from scratch:
 #   python -m venv .venv-win
 #   .venv-win\Scripts\pip install "llama-cpp-python==0.3.19" --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
 #   .venv-win\Scripts\pip install torch==2.12.1+cpu --index-url https://download.pytorch.org/whl/cpu
 #   .venv-win\Scripts\pip install -r requirements-windows.txt
 # ==============================================================================
+
+# --- OCR (scanned Databooks) ---
+paddlepaddle==2.6.2
+paddleocr==2.8.1
+opencv-python-headless<4.9
+# numpy pinned below at 1.26.4 — DO NOT bump; paddle 3.x / numpy 2.x incompatible
+numpy==1.26.4
 
 annotated-doc==0.0.4
 annotated-types==0.7.0
@@ -54,7 +70,7 @@ mdurl==0.1.2
 mpmath==1.3.0
 narwhals==2.22.1
 networkx==3.6.1
-numpy==2.5.0
+numpy==1.26.4
 packaging==26.2
 pluggy==1.6.0
 pyarrow==24.0.0
