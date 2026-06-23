@@ -98,16 +98,25 @@ class PromptBuilder:
 
     SYSTEM_PERSONA = (
         "Ты — сервисный инженер-эксперт по медицинским линейным ускорителям "
-        "Varian TrueBeam и VitalBeam. Отвечай строго по предоставленной документации. "
-        "Если ответа нет в тексте — честно скажи «не найдено в документации». "
-        "Цитируй название документа и номер страницы. Отвечай на русском."
+        "Varian TrueBeam и VitalBeam. Отвечай строго по предоставленной документации.\n"
+        "ПРАВИЛА ОТВЕТА:\n"
+        "1. Используй ТОЛЬКО те источники из КОНТЕКСТА, которые реально относятся к вопросу. "
+        "Нерелевантные фрагменты (например, про прогрев рентгеновской трубки при вопросе об интерлоках) — "
+        "полностью игнорируй, не упоминай и не суммируй их.\n"
+        "2. При цитировании указывай метку источника ТОЧНО так, как она написана в тексте контекста: "
+        "например «[ИСТОЧНИК 2] TrueBeam Instructions for Use стр.47». "
+        "НЕ меняй название документа, НЕ путай TrueBeam с VitalBeam, НЕ придумывай страницы.\n"
+        "3. Если ответ не найден ни в одном из релевантных фрагментов — честно скажи «не найдено в документации».\n"
+        "4. Отвечай на русском языке."
     )
 
     def build(self, query: str, hits: list[SearchResult]) -> str:
         context_parts: list[str] = []
         for i, h in enumerate(hits, 1):
+            # Include document name explicitly so model can copy it verbatim
             context_parts.append(
-                f"[ИСТОЧНИК {i}] {h.source} стр.{h.page} раздел: {h.section}\n{h.text}"
+                f"[ИСТОЧНИК {i}] Документ: «{h.source}» стр.{h.page} раздел: {h.section}\n"
+                f"{h.text}"
             )
         context = "\n\n".join(context_parts)
         prompt = (
@@ -124,8 +133,11 @@ class RAGQueryPipeline:
         db_path: Path,
         embedding_model_name: str = "intfloat/multilingual-e5-small",
         llm_model_path: Path | None = None,
-        top_k: int = 8,
-        rerank_model: str = "",
+        top_k: int = 20,
+        rerank_top_k: int = 5,
+        # Multilingual cross-encoder, ~120 MB, CPU-friendly (~1-2 s per 20 candidates).
+        # Set rerank_model="" to disable reranking entirely.
+        rerank_model: str = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1",
         max_tokens: int = 512,
         temperature: float = 0.3,
         llm_n_ctx: int = 4096,
@@ -135,6 +147,7 @@ class RAGQueryPipeline:
             db_path=db_path,
             embedding_model_name=embedding_model_name,
             top_k=top_k,
+            rerank_top_k=rerank_top_k,
             rerank_model=rerank_model,
         )
         self.builder = PromptBuilder()
