@@ -185,7 +185,15 @@ class CompanionWindow(QMainWindow):
         settings_action.setShortcut("Ctrl+,")
         file_menu.addSeparator()
         ocr_action = file_menu.addAction("OCR и индексация...")
-        ocr_action.triggered.connect(self._on_open_ocr)
+        from windows.ocr_dialog import ocr_available
+        if ocr_available():
+            ocr_action.triggered.connect(self._on_open_ocr)
+        else:
+            ocr_action.setEnabled(False)
+            ocr_action.setToolTip(
+                "OCR доступен только при запуске из исходников (.venv-win). "
+                "В собранном EXE-файле OCR отключён — запустите из источника для индексации."
+            )
 
     def _on_open_ocr(self) -> None:
         from windows.ocr_dialog import OCRDialog

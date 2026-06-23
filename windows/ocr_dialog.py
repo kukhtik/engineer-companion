@@ -24,6 +24,31 @@ from design.tokens import DribbbleDarkQt
 DOCS_DIR = Path(__file__).resolve().parents[1] / "docs"
 CACHE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "ocr_cache.jsonl"
 
+
+def ocr_available() -> bool:
+    """Return True if OCR can be used in the current runtime environment.
+
+    OCR requires:
+    - Running from source (not a frozen PyInstaller EXE).
+    - scripts/ocr_databooks.py present next to the source tree.
+    - paddleocr importable (i.e. installed in the active venv).
+
+    In a frozen build sys.executable is the EXE itself, paddle is not bundled,
+    and scripts/ is not part of the package — so OCR is unavailable there.
+    """
+    if getattr(sys, "frozen", False):
+        return False
+    script = _REPO / "scripts" / "ocr_databooks.py"
+    if not script.exists():
+        return False
+    try:
+        import importlib.util
+        if importlib.util.find_spec("paddleocr") is None:
+            return False
+    except Exception:
+        return False
+    return True
+
 # All 12 known PDFs
 _ALL_DOCS = [
     "TrueBeam 3.0 Volume 1 Field Service Databook.pdf",

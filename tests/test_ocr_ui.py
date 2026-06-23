@@ -293,3 +293,71 @@ class TestOcrWorkerMocked:
         assert finished_events[0].get("stopped") is True
         # Subprocess was asked to terminate
         mock_proc.terminate.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# TestOcrAvailable — frozen-mode detection
+# ---------------------------------------------------------------------------
+
+class TestOcrAvailable:
+    def test_ocr_available_false_when_frozen(self, monkeypatch):
+        """ocr_available() returns False when sys.frozen is True (PyInstaller EXE)."""
+        import windows.ocr_dialog as mod
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        # Reload the function binding (it reads sys.frozen at call time)
+        assert mod.ocr_available() is False
+
+    def test_ocr_available_false_when_script_missing(self, monkeypatch, tmp_path):
+        """ocr_available() returns False when scripts/ocr_databooks.py is not found."""
+        import windows.ocr_dialog as mod
+        # Make sure not frozen
+        monkeypatch.delattr(sys, "frozen", raising=False)
+        # Patch _REPO to a tmp dir without the script
+        monkeypatch.setattr(mod, "_REPO", tmp_path)
+        assert mod.ocr_available() is False
+
+    def test_ocr_available_true_in_source_run(self):
+        """ocr_available() returns True in a normal source-tree run with paddle installed."""
+        import windows.ocr_dialog as mod
+        # In CI / dev the script exists; paddle may or may not be installed.
+        # Only assert the contract: frozen=False + script present + paddle present → True.
+        # We skip if paddle is absent (this isn't the frozen check).
+        import importlib.util
+        if importlib.util.find_spec("paddleocr") is None:
+            pytest.skip("paddleocr not installed in this environment")
+        assert not getattr(sys, "frozen", False), "Should not be frozen in test run"
+        assert mod.ocr_available() is True
+
+    def test_menu_action_disabled_when_frozen(self, app, monkeypatch):
+        """When ocr_available() is False, the OCR menu action is disabled."""
+        # Patch ocr_available in the ocr_dialog module BEFORE CompanionWindow
+        # is constructed — _setup_menu() does a local import from that module.
+        import windows.ocr_dialog as mod
+        monkeypatch.setattr(mod, "ocr_available", lambda: False)
+
+        from windows.main_window import CompanionWindow
+        win = CompanionWindow(pipeline=None)
+
+        # Walk the menubar actions to find the "OCR" action.
+        # Keep the menubar and all intermediate objects alive via explicit refs.
+        menubar = win.menuBar()
+        ocr_action = None
+        for top_action in menubar.actions():
+            menu = top_action.menu()
+            if menu is None:
+                continue
+            for action in menu.actions():
+                if "OCR" in action.text():
+                    ocr_action = action
+                    break
+            if ocr_action is not None:
+                break
+
+        assert ocr_action is not None, "OCR menu action not found"
+        assert not ocr_action.isEnabled(), (
+            "OCR action should be disabled when ocr_available() is False"
+        )
+
+        win.close()
+        win.deleteLater()
+        app.processEvents()
