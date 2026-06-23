@@ -18,12 +18,15 @@
 #   https://download.pytorch.org/whl/cpu
 #
 # OCR DEPENDENCIES (for scanned TrueBeam Field Service Databooks):
-#   paddleocr==2.8.1, paddlepaddle==2.6.2, opencv-python-headless<4.9
+#   paddleocr==2.8.1, paddlepaddle==2.6.2, opencv-contrib-python==4.10.0.84
 #   numpy MUST stay at 1.26.4 — paddle 3.x crashes; do NOT upgrade paddlepaddle.
+#   IMPORTANT: use opencv-contrib-python ONLY — do NOT install opencv-python or
+#   opencv-python-headless alongside it; they all overwrite the same cv2/ dir
+#   and cause mixed-DLL crashes at runtime.
 #   Install after torch (paddle needs numpy <2):
 #     .venv-win\Scripts\pip install paddlepaddle==2.6.2
 #     .venv-win\Scripts\pip install paddleocr==2.8.1
-#     .venv-win\Scripts\pip install "opencv-python-headless<4.9"
+#     .venv-win\Scripts\pip install "opencv-contrib-python==4.10.0.84"
 #     .venv-win\Scripts\pip install "numpy==1.26.4"   # re-pin if anything bumps it
 #
 # To recreate this environment from scratch:
@@ -36,7 +39,10 @@
 # --- OCR (scanned Databooks) ---
 paddlepaddle==2.6.2
 paddleocr==2.8.1
-opencv-python-headless<4.9
+# opencv-contrib-python ONLY — paddleocr needs contrib extensions.
+# Do NOT install opencv-python or opencv-python-headless alongside it;
+# they all overwrite the same cv2/ dir and cause mixed-DLL crashes.
+opencv-contrib-python==4.10.0.84
 # numpy pinned below at 1.26.4 — DO NOT bump; paddle 3.x / numpy 2.x incompatible
 numpy==1.26.4
 

@@ -1,4 +1,5 @@
-"""Tests for OCR UI: ocr_stats, OCRDialog instantiation, worker with mock."""
+"""Tests for OCR UI: ocr_stats, OCRDialog instantiation, worker with mock subprocess."""
+import io
 import json
 import os
 import sys
@@ -173,12 +174,34 @@ class TestOCRDialogInstantiation:
 
 
 # ---------------------------------------------------------------------------
+# Helpers for mocking the OcrWorker subprocess
+# ---------------------------------------------------------------------------
+
+def _make_fake_popen(progress_events, summary):
+    """
+    Return a context-manager-compatible Popen mock whose stdout yields
+    JSON progress lines followed by a __SUMMARY__ line.
+    """
+    lines = [json.dumps(e) + "\n" for e in progress_events]
+    lines.append(f"__SUMMARY__ {json.dumps(summary)}\n")
+
+    mock_proc = MagicMock()
+    mock_proc.stdout = iter(lines)
+    mock_proc.stderr = iter([])
+    mock_proc.returncode = 0
+    mock_proc.wait.return_value = 0
+    mock_proc.terminate = MagicMock()
+    mock_proc.kill = MagicMock()
+    return mock_proc
+
+
+# ---------------------------------------------------------------------------
 # TestOcrWorkerMocked
 # ---------------------------------------------------------------------------
 
 class TestOcrWorkerMocked:
     def test_worker_emits_progress_and_finishes(self, app, tmp_path):
-        """OcrWorker emits progress N times and finished once."""
+        """OcrWorker spawns a subprocess, reads JSON lines, emits progress + finished."""
         from windows.ocr_dialog import OcrWorker
 
         fake_doc = tmp_path / "fake.pdf"
@@ -188,28 +211,21 @@ class TestOcrWorkerMocked:
         progress_events = []
         finished_events = []
 
-        def fake_run_ocr(doc_path, cache_path, progress_callback=None, should_stop=None, **kw):
-            for i in range(3):
-                if progress_callback:
-                    progress_callback({
-                        "doc": "fake.pdf",
-                        "page_index": i,
-                        "total_pages": 3,
-                        "source": "native",
-                        "ocr_count": 0,
-                        "native_count": i + 1,
-                        "done_count": i + 1,
-                        "elapsed_s": float(i),
-                    })
-            return {
-                "doc": "fake.pdf",
-                "total_pages": 3,
-                "ocr_count": 0,
-                "native_count": 3,
-                "skipped_cached": 0,
-                "elapsed_s": 3.0,
-                "stopped": False,
+        fake_progress = [
+            {
+                "doc": "fake.pdf", "page_index": i, "total_pages": 3,
+                "source": "native", "ocr_count": 0, "native_count": i + 1,
+                "done_count": i + 1, "elapsed_s": float(i),
             }
+            for i in range(3)
+        ]
+        fake_summary = {
+            "doc": "fake.pdf", "total_pages": 3, "ocr_count": 0,
+            "native_count": 3, "skipped_cached": 0, "elapsed_s": 3.0,
+            "stopped": False,
+        }
+
+        mock_proc = _make_fake_popen(fake_progress, fake_summary)
 
         stop_flag = [False]
         worker = OcrWorker(fake_doc, fake_cache, stop_flag)
@@ -217,84 +233,63 @@ class TestOcrWorkerMocked:
         worker.progress.connect(lambda e: progress_events.append(e))
         worker.finished.connect(lambda s: finished_events.append(s))
 
-        with patch("windows.ocr_dialog.OcrWorker.run", wraps=None) as _:
-            # Patch run_ocr at the import location in ocr_dialog module
-            pass
-
-        # Patch at the correct location
-        with patch("scripts.ocr_databooks.run_ocr", side_effect=fake_run_ocr):
-            # Re-import to get fresh binding... instead patch where OcrWorker imports it
-            import importlib
-            import windows.ocr_dialog as dlg_mod
-            original_run_ocr = None
-            try:
-                from scripts import ocr_databooks
-                original_run_ocr = ocr_databooks.run_ocr
-                ocr_databooks.run_ocr = fake_run_ocr
-
-                worker.start()
-                # Process events until worker finishes (max 5s)
-                deadline = time.time() + 5.0
-                while not finished_events and time.time() < deadline:
-                    app.processEvents()
-                    time.sleep(0.01)
-
-                worker.wait(5000)
-            finally:
-                if original_run_ocr is not None:
-                    ocr_databooks.run_ocr = original_run_ocr
-
-        assert len(progress_events) == 3, f"Expected 3 progress events, got {len(progress_events)}"
-        assert len(finished_events) == 1, f"Expected 1 finished event, got {len(finished_events)}"
-        assert finished_events[0]["doc"] == "fake.pdf"
-        assert finished_events[0]["stopped"] is False
-
-    def test_stop_flag_cancels_worker(self, app, tmp_path):
-        """Setting stop_flag[0]=True before start causes run_ocr to be called with a should_stop callable."""
-        from windows.ocr_dialog import OcrWorker
-
-        fake_doc = tmp_path / "fake2.pdf"
-        fake_doc.write_bytes(b"")
-        fake_cache = tmp_path / "cache2.jsonl"
-
-        captured_should_stop = []
-
-        def fake_run_ocr(doc_path, cache_path, progress_callback=None, should_stop=None, **kw):
-            captured_should_stop.append(should_stop)
-            # Immediately check stop
-            if should_stop and should_stop():
-                return {
-                    "doc": "fake2.pdf", "total_pages": 0, "ocr_count": 0,
-                    "native_count": 0, "skipped_cached": 0, "elapsed_s": 0.0, "stopped": True,
-                }
-            return {
-                "doc": "fake2.pdf", "total_pages": 0, "ocr_count": 0,
-                "native_count": 0, "skipped_cached": 0, "elapsed_s": 0.0, "stopped": False,
-            }
-
-        stop_flag = [True]  # Already set to True before start
-        worker = OcrWorker(fake_doc, fake_cache, stop_flag)
-
-        finished_events = []
-        worker.finished.connect(lambda s: finished_events.append(s))
-
-        from scripts import ocr_databooks
-        original = ocr_databooks.run_ocr
-        try:
-            ocr_databooks.run_ocr = fake_run_ocr
+        with patch("subprocess.Popen", return_value=mock_proc):
             worker.start()
             deadline = time.time() + 5.0
             while not finished_events and time.time() < deadline:
                 app.processEvents()
                 time.sleep(0.01)
             worker.wait(5000)
-        finally:
-            ocr_databooks.run_ocr = original
 
-        # should_stop was passed and returns True
-        assert len(captured_should_stop) == 1
-        assert captured_should_stop[0] is not None
-        assert callable(captured_should_stop[0])
-        assert captured_should_stop[0]() is True
+        assert len(progress_events) == 3, (
+            f"Expected 3 progress events, got {len(progress_events)}"
+        )
+        assert len(finished_events) == 1, (
+            f"Expected 1 finished event, got {len(finished_events)}"
+        )
+        assert finished_events[0]["doc"] == "fake.pdf"
+        assert finished_events[0]["stopped"] is False
+
+    def test_stop_flag_terminates_subprocess(self, app, tmp_path):
+        """Setting stop_flag[0]=True causes the worker to terminate the subprocess."""
+        from windows.ocr_dialog import OcrWorker
+
+        fake_doc = tmp_path / "fake2.pdf"
+        fake_doc.write_bytes(b"")
+        fake_cache = tmp_path / "cache2.jsonl"
+
+        # stop_flag already True — worker should terminate child immediately
+        stop_flag = [True]
+
+        # Give it one progress line so the loop body executes once before
+        # the stop check fires.
+        one_event = {
+            "doc": "fake2.pdf", "page_index": 0, "total_pages": 5,
+            "source": "native", "ocr_count": 0, "native_count": 1,
+            "done_count": 1, "elapsed_s": 0.1,
+        }
+        # Summary won't be reached because stop fires first.
+        mock_proc = _make_fake_popen([one_event], {
+            "doc": "fake2.pdf", "total_pages": 5, "ocr_count": 0,
+            "native_count": 1, "skipped_cached": 0, "elapsed_s": 0.1,
+            "stopped": True,
+        })
+
+        worker = OcrWorker(fake_doc, fake_cache, stop_flag)
+
+        finished_events = []
+        worker.finished.connect(lambda s: finished_events.append(s))
+
+        with patch("subprocess.Popen", return_value=mock_proc):
+            worker.start()
+            deadline = time.time() + 5.0
+            while not finished_events and time.time() < deadline:
+                app.processEvents()
+                time.sleep(0.01)
+            worker.wait(5000)
+
         assert len(finished_events) == 1
-        assert finished_events[0]["stopped"] is True
+        # Worker was stopped — terminated dict has stopped=True
+        assert finished_events[0].get("stopped") is True
+        # Subprocess was asked to terminate
+        mock_proc.terminate.assert_called_once()

@@ -478,9 +478,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         '--doc',
-        choices=['vol1', 'vol2', 'both'],
         default='both',
-        help='Which volume(s) to process (default: both)',
+        help=(
+            'Which volume(s) to process: "vol1", "vol2", "both" (shortcuts), '
+            'or an absolute/relative path to any PDF file. '
+            'When --progress-json is set this should be a path to a single PDF.'
+        ),
     )
     parser.add_argument(
         '--cache',
@@ -506,6 +509,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help='Comma-separated 0-indexed page numbers to process, e.g. "415,100,250"',
     )
+    parser.add_argument(
+        '--progress-json',
+        action='store_true',
+        default=False,
+        help=(
+            'Machine-readable mode: emit one JSON object per line to stdout for '
+            'each page event, and a final "__SUMMARY__ {json}" line. '
+            'Human-readable prints go to stderr. '
+            'Use with --doc <path-to-pdf>.'
+        ),
+    )
     return parser
 
 
@@ -516,6 +530,8 @@ DOC_FILENAMES = {
 
 
 def main() -> None:
+    import sys as _sys
+
     parser = _build_arg_parser()
     args = parser.parse_args()
 
@@ -523,15 +539,56 @@ def main() -> None:
     if args.pages:
         pages = [int(p.strip()) for p in args.pages.split(',') if p.strip()]
 
-    docs_to_process = ['vol1', 'vol2'] if args.doc == 'both' else [args.doc]
+    # --progress-json mode: single-doc subprocess interface used by OcrWorker
+    if args.progress_json:
+        doc_path = Path(args.doc)
+        if not doc_path.is_absolute():
+            doc_path = Path.cwd() / doc_path
+        if not doc_path.exists():
+            print(
+                json.dumps({'error': f'PDF not found: {doc_path}'}),
+                flush=True,
+            )
+            _sys.exit(1)
 
-    for vol_key in docs_to_process:
-        doc_path = args.docs_dir / DOC_FILENAMES[vol_key]
+        def _json_progress(event: dict) -> None:
+            print(json.dumps(event), flush=True)
+
+        summary = run_ocr(
+            doc_path=doc_path,
+            cache_path=args.cache,
+            max_pages=args.max_pages,
+            pages=pages,
+            progress_callback=_json_progress,
+        )
+        print(f'__SUMMARY__ {json.dumps(summary)}', flush=True)
+        return
+
+    # Normal human-readable CLI mode
+    doc_arg = args.doc
+    if doc_arg in ('vol1', 'vol2', 'both'):
+        docs_to_process = ['vol1', 'vol2'] if doc_arg == 'both' else [doc_arg]
+        for vol_key in docs_to_process:
+            doc_path = args.docs_dir / DOC_FILENAMES[vol_key]
+            if not doc_path.exists():
+                log.error("doc_not_found", path=str(doc_path))
+                print(f"ERROR: PDF not found: {doc_path}")
+                continue
+            run_ocr(
+                doc_path=doc_path,
+                cache_path=args.cache,
+                max_pages=args.max_pages,
+                pages=pages,
+            )
+    else:
+        # Treat as a direct file path
+        doc_path = Path(doc_arg)
+        if not doc_path.is_absolute():
+            doc_path = Path.cwd() / doc_path
         if not doc_path.exists():
             log.error("doc_not_found", path=str(doc_path))
             print(f"ERROR: PDF not found: {doc_path}")
-            continue
-
+            return
         run_ocr(
             doc_path=doc_path,
             cache_path=args.cache,

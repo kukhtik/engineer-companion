@@ -1,6 +1,9 @@
 """OCR Dialog — in-app OCR management panel."""
 
+import json
 import os
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Optional
@@ -13,7 +16,6 @@ from PySide6.QtWidgets import (
     QApplication,
 )
 
-import sys
 _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO))
 
@@ -40,7 +42,18 @@ _ALL_DOCS = [
 
 
 class OcrWorker(QThread):
-    """Background thread for running OCR on a single document."""
+    """Background thread for running OCR on a single document.
+
+    Spawns scripts/ocr_databooks.py as a *subprocess* with --progress-json so
+    that PaddlePaddle is never imported inside the GUI process.  This avoids a
+    Windows DLL conflict when paddle is loaded after torch (OSError: shm.dll).
+
+    The subprocess emits one JSON line per page to stdout.  We read those lines
+    here and re-emit the existing Qt progress / finished / error signals so the
+    rest of the UI code is unchanged.
+
+    Stop: setting stop_flag[0] = True causes us to terminate the child process.
+    """
 
     progress = Signal(dict)
     finished = Signal(dict)
@@ -50,26 +63,127 @@ class OcrWorker(QThread):
         super().__init__()
         self._doc_path = doc_path
         self._cache_path = cache_path
-        self._stop_flag = stop_flag  # mutable list [False], Stop sets [0]=True
-
-    def _emit_progress(self, event: dict) -> None:
-        self.progress.emit(event)
+        self._stop_flag = stop_flag  # mutable list [False]; Stop sets [0]=True
+        self._proc: Optional[subprocess.Popen] = None
 
     def _check_stop(self) -> bool:
         return bool(self._stop_flag[0])
 
     def run(self) -> None:
+        # Build the subprocess command using the same interpreter as the app.
+        script = str(_REPO / "scripts" / "ocr_databooks.py")
+        cmd = [
+            sys.executable,
+            script,
+            "--doc", str(self._doc_path),
+            "--cache", str(self._cache_path),
+            "--progress-json",
+        ]
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(_REPO)
+        # Ensure stdout is not buffered inside the child process.
+        env["PYTHONUNBUFFERED"] = "1"
+
         try:
-            from scripts.ocr_databooks import run_ocr
-            summary = run_ocr(
-                doc_path=self._doc_path,
-                cache_path=self._cache_path,
-                progress_callback=self._emit_progress,
-                should_stop=self._check_stop,
+            self._proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,  # line-buffered
             )
-            self.finished.emit(summary)
         except Exception as exc:
-            self.error.emit(str(exc))
+            self.error.emit(f"Failed to start OCR subprocess: {exc}")
+            return
+
+        summary: Optional[dict] = None
+        stderr_lines: list = []
+
+        try:
+            for line in self._proc.stdout:  # type: ignore[union-attr]
+                # Check stop flag — terminate child if requested.
+                if self._check_stop():
+                    self._proc.terminate()
+                    try:
+                        self._proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        self._proc.kill()
+                    # Build a minimal stopped summary from the last progress event.
+                    if summary is None:
+                        summary = {
+                            'doc': self._doc_path.name,
+                            'total_pages': 0,
+                            'ocr_count': 0,
+                            'native_count': 0,
+                            'skipped_cached': 0,
+                            'elapsed_s': 0.0,
+                            'stopped': True,
+                        }
+                    else:
+                        summary['stopped'] = True
+                    self.finished.emit(summary)
+                    return
+
+                line = line.rstrip('\n')
+                if not line:
+                    continue
+
+                if line.startswith('__SUMMARY__ '):
+                    # Final summary line from the subprocess.
+                    try:
+                        summary = json.loads(line[len('__SUMMARY__ '):])
+                    except json.JSONDecodeError:
+                        pass
+                    continue
+
+                # Try to parse as a progress JSON line.
+                try:
+                    event = json.loads(line)
+                    if isinstance(event, dict):
+                        # Keep the latest event as a partial summary in case of
+                        # early termination.
+                        summary = {
+                            'doc': event.get('doc', self._doc_path.name),
+                            'total_pages': event.get('total_pages', 0),
+                            'ocr_count': event.get('ocr_count', 0),
+                            'native_count': event.get('native_count', 0),
+                            'skipped_cached': 0,
+                            'elapsed_s': event.get('elapsed_s', 0.0),
+                            'stopped': False,
+                        }
+                        self.progress.emit(event)
+                except json.JSONDecodeError:
+                    # Not a JSON line — might be a stray print; ignore.
+                    pass
+
+            # Drain stderr for error reporting.
+            if self._proc.stderr:
+                for ln in self._proc.stderr:
+                    stderr_lines.append(ln.rstrip('\n'))
+
+            self._proc.wait()
+            rc = self._proc.returncode
+
+        except Exception as exc:
+            self.error.emit(f"OCR subprocess error: {exc}")
+            return
+        finally:
+            self._proc = None
+
+        if rc != 0 and summary is None:
+            err_msg = '\n'.join(stderr_lines[-20:]) or f"OCR subprocess exited with code {rc}"
+            self.error.emit(err_msg)
+            return
+
+        if summary is None:
+            # Process finished without emitting a summary — treat as error.
+            self.error.emit("OCR subprocess produced no output")
+            return
+
+        self.finished.emit(summary)
 
 
 class ReindexWorker(QThread):
