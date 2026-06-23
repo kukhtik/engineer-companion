@@ -1,7 +1,11 @@
 docs/*.pdf
 assets/db/
 .venv/
+.venv-win/
+.venv.bak*/
+.venv.wsl_bak/
 __pycache__/
+*.pyc
 *.egg-info/
 dist/
 build/
