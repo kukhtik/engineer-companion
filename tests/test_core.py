@@ -7,7 +7,7 @@ _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO))
 
 import pytest
-from core.indexer import Chunker, Chunk, PdfTextExtractor, _estimate_tokens
+from core.indexer import Chunker, Chunk, PdfTextExtractor, _estimate_tokens, is_low_quality_chunk
 from core.query import PromptBuilder, SearchResult, Retriever
 
 
@@ -202,3 +202,67 @@ class TestSearchResultDataclass:
         r = repr(sr)
         assert "src.pdf" in r
         assert "S1" in r
+
+
+class TestQualityFilter:
+    """Tests for is_low_quality_chunk — the garbage-chunk heuristic."""
+
+    # --- GARBAGE cases (must return True) ---
+
+    def test_scan_artifact_ocr_gibberish(self):
+        # Binary/OCR debris with tilde-trains and control chars
+        assert is_low_quality_chunk("- - 8 7 5 t-=-f-cJ~~~~~~~ 100050108 B") is True
+
+    def test_control_char_debris(self):
+        # Control characters (0x0b = \x0b vertical tab) with no real words
+        assert is_low_quality_chunk("abc\x0bdef\x0c\x0e xyz 123 456 789 0ab") is True
+
+    def test_dot_train_toc_line(self):
+        # TOC dot-trains: almost no alphabetic chars, no real words
+        garbage = "3.1 .......... 45 3.2 .......... 67 3.3 .......... 89 4.0 .......100"
+        assert is_low_quality_chunk(garbage) is True
+
+    def test_too_short_fragment(self):
+        # Fewer than 5 tokens — always garbage regardless of content
+        assert is_low_quality_chunk("voltage") is True
+        assert is_low_quality_chunk("beam on") is True
+        assert is_low_quality_chunk("3.2 see") is True
+
+    def test_high_nonascii_noncy(self):
+        # Dense non-ASCII non-Cyrillic = encoding garbage
+        garbage = "؀؁؂ 一丁丂 ؀؁ 一丁 ؂丂 bogus"
+        assert is_low_quality_chunk(garbage) is True
+
+    # --- CLEAN cases (must return False) ---
+
+    def test_clean_russian_technical(self):
+        text = (
+            "Абсолютная калибровка дозы выполняется с использованием ионизационной камеры "
+            "в условиях референсного поля 10x10 см на глубине 10 см в воде при SSD 100 см. "
+            "Результаты должны соответствовать протоколу TRS-398 МАГАТЭ."
+        )
+        assert is_low_quality_chunk(text) is False
+
+    def test_clean_english_technical(self):
+        text = (
+            "The TrueBeam system uses a dual-energy linear accelerator capable of delivering "
+            "photon beams at 6 MV and 15 MV as well as electron beams from 6 to 20 MeV. "
+            "Beam calibration must be verified monthly per institutional protocol."
+        )
+        assert is_low_quality_chunk(text) is False
+
+    def test_clean_mixed_russian_english(self):
+        text = (
+            "Interlocks системы безопасности TrueBeam делятся на категории: "
+            "Machine Interlock, Beam Hold и Treatment Interlock. "
+            "При срабатывании любого из них подача излучения немедленно прекращается."
+        )
+        assert is_low_quality_chunk(text) is False
+
+    def test_clean_sentence_with_numbers(self):
+        # Numbers + technical terms — should NOT be flagged
+        text = (
+            "Field size at isocenter: 10 x 10 cm. SSD: 100 cm. "
+            "Depth of measurement: 10 cm. Output factor: 1.000 cGy/MU."
+        )
+        assert is_low_quality_chunk(text) is False
