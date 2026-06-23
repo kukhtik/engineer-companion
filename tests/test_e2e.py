@@ -144,7 +144,8 @@ class TestLLMLoadsModel:
             "What is 2+2? Answer in one word.",
             max_tokens=20,
             temperature=0,
-            stop=["\n"],
+            # No stop token: Gemma may begin its reply with a newline before the
+            # actual answer, so stopping on "\n" yields an empty string on Windows.
         )
         answer = r["choices"][0]["text"].strip()
         assert len(answer) > 0, "Empty answer from LLM"

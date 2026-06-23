@@ -33,11 +33,14 @@ class TestAssetsLoader:
     def test_get_android_files_dir_uses_chaquopy_env(self, monkeypatch):
         monkeypatch.setenv("ANDROID_FILES_DIR", "/data/local/tmp")
         result = get_android_files_dir()
-        assert str(result) == "/data/local/tmp"
+        # Compare parts individually so assertion passes on Windows (backslash) and Linux (forward-slash)
+        assert result is not None
+        assert result.parts[-3:] == ("data", "local", "tmp")
 
     def test_resolve_db_path_desktop_fallback(self):
         path = resolve_db_path("engineer.db")
-        assert str(path).endswith("assets/db/engineer.db")
+        # Use Path comparison to be OS-agnostic (avoids forward- vs back-slash mismatch)
+        assert path.parts[-3:] == ("assets", "db", "engineer.db")
 
     def test_resolve_model_path_none_when_missing(self):
         path = resolve_model_path("nonexistent.gguf")
@@ -92,7 +95,7 @@ class TestKivyAppHelpers:
     def test_main_module_imports(self):
         """Verify android/main.py can be parsed without Kivy runtime error."""
         import ast
-        with open(Path(__file__).resolve().parents[1] / "android" / "main.py") as f:
+        with open(Path(__file__).resolve().parents[1] / "android" / "main.py", encoding="utf-8") as f:
             tree = ast.parse(f.read())
         # Check it's valid AST — no syntax errors
         assert tree.body, "main.py has parseable AST"
