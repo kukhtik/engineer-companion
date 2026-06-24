@@ -18,6 +18,12 @@ Phase 2 changes:
 - "Файл → Библиотека и индекс…" opens LibraryDialog
 - Status bar shows "Документов: N · Чанков: M" (refreshed on startup + dialog close)
 - Retriever pipeline reset helper after library changes
+
+Phase 3 changes:
+- Source links in chat_log are clickable (source: custom URL scheme)
+- anchorClicked handler opens PageViewer (windows/pdf_render + windows/page_viewer)
+- Sidebar results_list double-click opens PageViewer
+- PageViewer: zoom, prev/next, open-original, OCR high-DPI default, off-thread rendering
 """
 
 import html
@@ -26,6 +32,7 @@ import re
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from PySide6.QtCore import Qt, QThread, Signal, QUrl
 from PySide6.QtWidgets import (
@@ -142,9 +149,16 @@ class ChatHistory:
             parts.append(f'<div style="margin-bottom:8px;">{_markdownish_to_html(e["answer"])}</div>')
             parts.append('<div style="color:#7A7A7A;font-size:11px;">Источники:</div>')
             for src in e.get("sources", []):
+                # Build a source: link so user can click to open PDF page viewer
+                # Format: source:{url-encoded filename}|{page}|{ocr_flag}
+                section = src.get("section", "")
+                is_ocr = "1" if section.startswith("[OCR] ") else "0"
+                src_href = f"source:{quote(src['source'])}|{src['page']}|{is_ocr}"
                 parts.append(
-                    f'<div style="color:#7A7A7A;font-size:11px;margin-left:8px;">'
-                    f'• {html.escape(src["source"])} стр.{src["page"]} — {html.escape(src["section"])}</div>'
+                    f'<div style="font-size:11px;margin-left:8px;">'
+                    f'• <a href="{src_href}" style="color:#F5C518;text-decoration:underline;">'
+                    f'{html.escape(src["source"])} стр.{src["page"]}</a>'
+                    f' — <span style="color:#7A7A7A;">{html.escape(section)}</span></div>'
                 )
         return "".join(parts)
 
@@ -341,6 +355,7 @@ class CompanionWindow(QMainWindow):
         self.results_list = QListWidget()
         self.results_list.setSpacing(4)
         self.results_list.itemClicked.connect(self._on_result_clicked)
+        self.results_list.itemDoubleClicked.connect(self._on_result_double_clicked)
         left_v.addWidget(self.results_list, stretch=1)
 
         self.meta_label = QLabel()
@@ -378,6 +393,7 @@ class CompanionWindow(QMainWindow):
 
         self.chat_log = QTextBrowser()
         self.chat_log.setOpenExternalLinks(False)
+        self.chat_log.setOpenLinks(False)  # suppress navigation; anchorClicked handles all links
         self.chat_log.anchorClicked.connect(self._on_anchor_clicked)
         self.chat_log.setHtml(
             '<div style="color:#7A7A7A;">'
@@ -539,11 +555,47 @@ class CompanionWindow(QMainWindow):
             f'</div>'
         )
 
+    def _on_result_double_clicked(self, item: QListWidgetItem) -> None:
+        """Open PDF page viewer for the double-clicked source in the sidebar."""
+        data = json.loads(item.data(Qt.UserRole))
+        filename = data.get("source", "")
+        page = data.get("page", 1)
+        section = data.get("section", "")
+        is_ocr = section.startswith("[OCR] ")
+        self._open_page_viewer(filename, page, is_ocr)
+
+    def _open_page_viewer(self, filename: str, page: int, is_ocr: bool = False) -> None:
+        """Resolve the PDF, then open PageViewer dialog."""
+        from windows.pdf_render import resolve_pdf
+        from windows.page_viewer import PageViewer
+        pdf_path = resolve_pdf(filename)
+        viewer = PageViewer(
+            pdf_path=pdf_path,
+            page_number=page,
+            source_name=filename,
+            parent=self,
+            is_ocr=is_ocr,
+        )
+        viewer.exec()
+
     def _on_anchor_clicked(self, url: QUrl) -> None:
         if url.scheme() == "bookmark":
             idx = int(url.host())
             self.history.toggle_bookmark(idx)
             self.chat_log.setHtml(self.history.format_html())
+        elif url.scheme() == "source":
+            # Parse: source:{encoded_filename}|{page}|{ocr_flag}
+            # QUrl.path() decodes percent-encoding and preserves pipe separators
+            path = url.path()
+            parts = path.split("|")
+            if len(parts) >= 2:
+                filename = parts[0]
+                try:
+                    page = int(parts[1])
+                except ValueError:
+                    page = 1
+                is_ocr = len(parts) >= 3 and parts[2] == "1"
+                self._open_page_viewer(filename, page, is_ocr)
 
     def _on_clear_history(self) -> None:
         self.history.clear()
