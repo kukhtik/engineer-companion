@@ -52,6 +52,15 @@ EXCLUDES = [
     "matplotlib", "scipy", "pandas", "scikit_learn",
     "Cython", "setuptools", "pip", "wheel",
     "pytest", "unittest",
+    # OCR stack — only used from source via subprocess; never needed in frozen EXE
+    "paddle", "paddleocr", "paddlenlp",
+    "cv2", "opencv",
+    "skimage", "imageio",
+    "imgaug",
+    "lmdb",
+    "pyclipper",
+    "tensorflow_core",
+    "astor",
 ]
 
 DATA_DIRS = ["assets", "core", "design", "windows", "docs"]
@@ -119,7 +128,7 @@ def check_deps() -> None:
         )
         if result.returncode != 0:
             die(f"Cannot install {pip_name}. Run manually:\n  pip install {pip_name}")
-        print(f"  {pip_name} ✓")
+        print(f"  {pip_name} [OK]")
 
     print("Re-checking...")
     for pip_name, import_name in _PACKAGE_IMPORT_MAP.items():
@@ -266,9 +275,9 @@ def verify_output() -> None:
     # Check PySide6 is bundled
     pyside_dir = internal / "PySide6"
     if not pyside_dir.exists():
-        die("PySide6 NOT bundled — rebuild with --clean")
+        die("PySide6 NOT bundled - rebuild with --clean")
 
-    print(f"\n✓ Build OK: {out}")
+    print(f"\n[OK] Build OK: {out}")
     print(f"  PySide6 bundled: {pyside_dir}")
     print(f"  Size: {out.stat().st_size // 1024 // 1024} MB")
 
