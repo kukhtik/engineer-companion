@@ -198,6 +198,7 @@ class CompanionWindow(QMainWindow):
         self._setup_menu()
         self._build_ui()
         self._apply_tokens()
+        self._apply_startup_appearance()
         self._restore_history()
         # Phase 2: populate index status bar on startup
         self._refresh_index_status()
@@ -261,38 +262,54 @@ class CompanionWindow(QMainWindow):
         self._refresh_index_status()
         self._reset_pipeline_retriever()
 
+    def _rebuild_pipeline(self) -> None:
+        """Rebuild RAGQueryPipeline from current self.settings."""
+        from windows.settings_dialog import DEFAULT_RERANK_MODEL
+        db = self.settings.get("db_path") or ""
+        llm_path = self.settings.get("llm_model_path") or ""
+        if db and not Path(db).exists():
+            db = ""
+        if llm_path and not Path(llm_path).exists():
+            llm_path = ""
+
+        rerank_enabled = self.settings.get("rerank_enabled", True)
+        rerank_model = DEFAULT_RERANK_MODEL if rerank_enabled else ""
+
+        if llm_path:
+            try:
+                self.pipeline = RAGQueryPipeline(
+                    db_path=Path(db) if db else _default_db_path(),
+                    llm_model_path=Path(llm_path),
+                    top_k=self.settings.get("top_k", 8),
+                    rerank_top_k=self.settings.get("rerank_top_k", 5),
+                    rerank_model=rerank_model,
+                    max_tokens=self.settings.get("max_tokens", 512),
+                    temperature=self.settings.get("temperature", 0.3),
+                    llm_n_ctx=self.settings.get("n_ctx", 2048),
+                    llm_n_threads=self.settings.get("n_threads", 2),
+                )
+            except Exception as exc:
+                QMessageBox.warning(self, "Ошибка", f"Не удалось загрузить модель:\n{exc}")
+                self.pipeline = None
+        else:
+            self.pipeline = None
+
     def _on_open_ocr(self) -> None:
         from windows.ocr_dialog import OCRDialog
         dlg = OCRDialog(self)
         dlg.exec()
 
     def _on_open_settings(self) -> None:
-        dlg = SettingsDialog(self, current=self.settings)
+        from windows.settings_dialog import apply_font_scale, apply_density
+        dlg = SettingsDialog(self, current=self.settings, theme_manager=self._theme_manager)
         if dlg.exec():
             self.settings = dlg.get_settings()
-            db = self.settings.get("db_path") or ""
-            llm_path = self.settings.get("llm_model_path") or ""
-            if db and not Path(db).exists():
-                db = ""
-            if llm_path and not Path(llm_path).exists():
-                llm_path = ""
-
-            if llm_path:
-                try:
-                    self.pipeline = RAGQueryPipeline(
-                        db_path=Path(db) if db else _default_db_path(),
-                        llm_model_path=Path(llm_path),
-                        top_k=self.settings.get("top_k", 8),
-                        max_tokens=self.settings.get("max_tokens", 512),
-                        temperature=self.settings.get("temperature", 0.3),
-                        llm_n_ctx=2048,
-                        llm_n_threads=2,
-                    )
-                except Exception as exc:
-                    QMessageBox.warning(self, "Ошибка", f"Не удалось загрузить модель:\n{exc}")
-                    self.pipeline = None
-            else:
-                self.pipeline = None
+            self._rebuild_pipeline()
+            # Apply appearance settings live
+            app = QApplication.instance()
+            if app is not None:
+                apply_font_scale(app, self.settings.get("font_scale", 100))
+                apply_density(app, self.settings.get("density", "comfortable"))
 
     def _on_export_chat(self) -> None:
         if not self.history.entries:
@@ -452,6 +469,14 @@ class CompanionWindow(QMainWindow):
         else:
             from design.tokens import as_stylesheet
             self.setStyleSheet(as_stylesheet(self._theme_manager.get_theme_obj()))
+
+    def _apply_startup_appearance(self) -> None:
+        """Apply font scale and density from persisted settings at startup."""
+        from windows.settings_dialog import apply_font_scale, apply_density
+        app = QApplication.instance()
+        if app is not None:
+            apply_font_scale(app, self.settings.get("font_scale", 100))
+            apply_density(app, self.settings.get("density", "comfortable"))
 
     # ------------------------------------------------------------------
     # History
