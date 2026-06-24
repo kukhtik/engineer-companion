@@ -13,6 +13,11 @@ Phase 1 changes:
 - ThemeManager wired at startup (default DARK; persists across runs)
 - "Вид -> Тема" menu for live dark/light switching without restart
 - app_paths.ensure_seeded() + app_paths.db_path() used for default DB
+
+Phase 2 changes:
+- "Файл → Библиотека и индекс…" opens LibraryDialog
+- Status bar shows "Документов: N · Чанков: M" (refreshed on startup + dialog close)
+- Retriever pipeline reset helper after library changes
 """
 
 import html
@@ -180,6 +185,8 @@ class CompanionWindow(QMainWindow):
         self._build_ui()
         self._apply_tokens()
         self._restore_history()
+        # Phase 2: populate index status bar on startup
+        self._refresh_index_status()
 
     # ------------------------------------------------------------------
     # Menu
@@ -196,6 +203,10 @@ class CompanionWindow(QMainWindow):
         settings_action = file_menu.addAction("Настройки...")
         settings_action.triggered.connect(self._on_open_settings)
         settings_action.setShortcut("Ctrl+,")
+        file_menu.addSeparator()
+        library_action = file_menu.addAction("Библиотека и индекс...")
+        library_action.triggered.connect(self._on_open_library)
+        library_action.setShortcut("Ctrl+L")
         file_menu.addSeparator()
         ocr_action = file_menu.addAction("OCR и индексация...")
         from windows.ocr_dialog import ocr_available
@@ -227,6 +238,14 @@ class CompanionWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Dialogs
     # ------------------------------------------------------------------
+
+    def _on_open_library(self) -> None:
+        from windows.library_dialog import LibraryDialog
+        dlg = LibraryDialog(self, db_path=_default_db_path())
+        dlg.exec()
+        # Refresh status bar + reset pipeline retriever after any library changes
+        self._refresh_index_status()
+        self._reset_pipeline_retriever()
 
     def _on_open_ocr(self) -> None:
         from windows.ocr_dialog import OCRDialog
@@ -394,6 +413,11 @@ class CompanionWindow(QMainWindow):
         outer_splitter.setSizes([300, 660])
         root.addWidget(outer_splitter)
 
+        # ---- Phase 2: index status indicator (status bar) ----
+        self.index_status_label = QLabel("Документов: — · Чанков: —")
+        self.index_status_label.setObjectName("muted")
+        self.statusBar().addPermanentWidget(self.index_status_label)
+
         # ---- Backward-compat shims ----
         # Tests reference window.search_edit and window.search_btn;
         # wire them to the unified widgets so nothing breaks.
@@ -469,6 +493,42 @@ class CompanionWindow(QMainWindow):
     def _cleanup_worker(self) -> None:
         self.send_btn.setEnabled(True)
         self.worker = None
+
+    # ------------------------------------------------------------------
+    # Phase 2: index status helpers
+    # ------------------------------------------------------------------
+
+    def _refresh_index_status(self) -> None:
+        """Update the status bar label with current DB chunk counts."""
+        try:
+            from core.indexer import index_stats
+            stats = index_stats(_default_db_path())
+            n_docs = len(stats["per_doc"])
+            n_chunks = stats["total_chunks"]
+            self.index_status_label.setText(
+                f"Документов: {n_docs} · Чанков: {n_chunks}"
+            )
+        except Exception:
+            self.index_status_label.setText("Документов: — · Чанков: —")
+
+    def _reset_pipeline_retriever(self) -> None:
+        """Force a fresh LanceDB table handle on the next query.
+
+        If the pipeline caches a table object (lancedb reads are lazy),
+        clearing the cached handle ensures new chunks are visible immediately.
+        """
+        if self.pipeline is None:
+            return
+        try:
+            retriever = getattr(self.pipeline, "retriever", None)
+            if retriever is not None:
+                # Clear the cached table so it is re-opened on the next search
+                if hasattr(retriever, "_table"):
+                    retriever._table = None
+                if hasattr(retriever, "_db"):
+                    retriever._db = None
+        except Exception:
+            pass
 
     def _on_result_clicked(self, item: QListWidgetItem) -> None:
         data = json.loads(item.data(Qt.UserRole))

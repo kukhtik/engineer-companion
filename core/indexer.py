@@ -204,6 +204,30 @@ class Chunker:
                 break
 
 
+# ---------------------------------------------------------------------------
+# LanceDB compatibility helper
+# ---------------------------------------------------------------------------
+
+def _lancedb_has_table(db, name: str) -> bool:
+    """Return True if *name* is in the lancedb table list.
+
+    Handles both the new ``list_tables()`` API (returns object with .tables)
+    and the legacy ``table_names()`` (returns a list, now deprecated).
+    """
+    try:
+        result = db.list_tables()
+        if hasattr(result, "tables"):
+            return name in result.tables
+        if isinstance(result, list):
+            return name in result
+    except Exception:
+        pass
+    try:
+        return name in db.table_names()
+    except Exception:
+        return False
+
+
 class DocumentIndexPipeline:
     def __init__(self,
                  extractor: PdfTextExtractor,
@@ -239,7 +263,7 @@ class DocumentIndexPipeline:
             import lancedb
             import pyarrow as pa
             self._db = lancedb.connect(str(self.db_path))
-            if "chunks" not in self._db.table_names():
+            if not _lancedb_has_table(self._db, "chunks"):
                 schema = pa.schema([
                     pa.field("id", pa.string()),
                     pa.field("text", pa.string()),
@@ -260,7 +284,7 @@ class DocumentIndexPipeline:
         payload = f"{chunk.source}:{chunk.page}:{chunk.chunk_index}:{chunk.text[:200]}"
         return hashlib.md5(payload.encode()).hexdigest()[:16]
 
-    def index_pdf(self, pdf_path: Path) -> None:
+    def index_pdf(self, pdf_path: Path, progress_callback=None) -> None:
         logger.info("indexing_pdf", path=str(pdf_path))
         all_chunks: list[Chunk] = []
         for page, heading, para in self.extractor.extract_with_structure(pdf_path):
@@ -295,7 +319,33 @@ class DocumentIndexPipeline:
 
         model = self._get_model()
         texts = [c.text for c in chunks]
-        embeddings = model.encode(texts, show_progress_bar=False, convert_to_numpy=True, normalize_embeddings=True, device="cpu")
+
+        # Embed in batches so we can emit progress
+        _BATCH = 64
+        embeddings_list = []
+        chunks_added = 0
+        total_pages = chunks[-1].page if chunks else 0
+        for i in range(0, len(texts), _BATCH):
+            batch_embs = model.encode(
+                texts[i:i + _BATCH],
+                show_progress_bar=False,
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+                device="cpu",
+            )
+            embeddings_list.append(batch_embs)
+            chunks_added += len(batch_embs)
+            if progress_callback is not None:
+                progress_callback({
+                    "source": pdf_path.name,
+                    "page_index": chunks[min(i + _BATCH - 1, len(chunks) - 1)].page,
+                    "total_pages": total_pages,
+                    "chunks_added": chunks_added,
+                    "done": False,
+                })
+
+        import numpy as _np
+        embeddings = _np.concatenate(embeddings_list, axis=0)
 
         table = self._get_table()
         records = []
@@ -313,6 +363,15 @@ class DocumentIndexPipeline:
             records.append(rec)
         table.add(records)
         logger.info("pdf_indexed", path=str(pdf_path), chunks=len(records))
+
+        if progress_callback is not None:
+            progress_callback({
+                "source": pdf_path.name,
+                "page_index": total_pages,
+                "total_pages": total_pages,
+                "chunks_added": len(records),
+                "done": True,
+            })
 
     def build_index(self, docs_dir: Path) -> None:
         pdfs = sorted(docs_dir.glob("*.pdf"))
@@ -434,6 +493,268 @@ class DocumentIndexPipeline:
             records.append(rec)
         table.add(records)
         logger.info("pdf_indexed_with_ocr", path=str(pdf_path), chunks=len(records))
+
+
+# ---------------------------------------------------------------------------
+# Module-level utility functions (do not require a DocumentIndexPipeline instance)
+# ---------------------------------------------------------------------------
+
+def index_stats(db_path: Path) -> dict:
+    """Return chunk counts and page counts per document stored in *db_path*.
+
+    Returns::
+
+        {
+            "total_chunks": int,
+            "per_doc": [{"source": str, "chunks": int, "pages": int}, ...]
+        }
+
+    If the database or the "chunks" table does not exist, returns
+    ``{"total_chunks": 0, "per_doc": []}``.
+
+    Uses ``to_arrow()`` (no pylance dependency) for aggregation.
+    """
+    try:
+        import lancedb
+    except ImportError:
+        return {"total_chunks": 0, "per_doc": []}
+
+    try:
+        db = lancedb.connect(str(db_path))
+        if not _lancedb_has_table(db, "chunks"):
+            return {"total_chunks": 0, "per_doc": []}
+        table = db.open_table("chunks")
+        total = table.count_rows()
+        if total == 0:
+            return {"total_chunks": 0, "per_doc": []}
+        arrow = table.to_arrow()
+    except Exception:
+        return {"total_chunks": 0, "per_doc": []}
+
+    # Aggregate using plain Python — no pandas/numpy needed
+    from collections import defaultdict
+    tbl = {
+        "source": arrow.column("source").to_pylist(),
+        "page": arrow.column("page").to_pylist(),
+    }
+    pages_per_doc: dict[str, set] = defaultdict(set)
+    chunks_per_doc: dict[str, int] = defaultdict(int)
+    for src, pg in zip(tbl["source"], tbl["page"]):
+        pages_per_doc[src].add(pg)
+        chunks_per_doc[src] += 1
+
+    per_doc = [
+        {"source": src, "chunks": chunks_per_doc[src], "pages": len(pages_per_doc[src])}
+        for src in sorted(chunks_per_doc)
+    ]
+    return {"total_chunks": total, "per_doc": per_doc}
+
+
+def remove_document(db_path: Path, source: str) -> int:
+    """Delete all chunks whose *source* field equals *source*.
+
+    Returns the number of rows removed, or 0 if the db/table does not exist
+    or no matching rows were found.
+
+    Uses ``count_rows()`` and a filter expression — no pylance dependency.
+    """
+    try:
+        import lancedb
+    except ImportError:
+        return 0
+
+    try:
+        db = lancedb.connect(str(db_path))
+        if not _lancedb_has_table(db, "chunks"):
+            return 0
+        table = db.open_table("chunks")
+    except Exception:
+        return 0
+
+    # Escape single-quotes for the SQL WHERE clause
+    safe_source = source.replace("'", "''")
+    where_clause = f"source = '{safe_source}'"
+
+    # Count before deletion using a filtered scan
+    try:
+        before = table.count_rows(filter=where_clause)
+    except Exception:
+        # Fallback: count via to_arrow if filter arg not supported
+        try:
+            arrow = table.to_arrow()
+            srcs = arrow.column("source").to_pylist()
+            before = sum(1 for s in srcs if s == source)
+        except Exception:
+            return 0
+
+    if before == 0:
+        return 0
+
+    table.delete(where_clause)
+    return before
+
+
+def index_new_pdf(
+    pdf_path: Path,
+    db_path: Path,
+    progress_callback=None,
+    should_stop=None,
+) -> int:
+    """Index a single PDF file into the LanceDB at *db_path*.
+
+    Args:
+        pdf_path: Path to the PDF to index.
+        db_path: Path to the LanceDB directory (created if absent).
+        progress_callback: Optional callable receiving a dict::
+
+            {"source": str, "page_index": int, "total_pages": int,
+             "chunks_added": int, "done": bool}
+
+        should_stop: Optional list ``[False]``; set ``should_stop[0] = True``
+            from another thread to abort early.
+
+    Returns:
+        Total number of chunks written to the database.
+    """
+    import lancedb
+    import pyarrow as pa
+    from sentence_transformers import SentenceTransformer
+
+    # ------------------------------------------------------------------
+    # Load embedding model (mirrors DocumentIndexPipeline._get_model)
+    # ------------------------------------------------------------------
+    try:
+        from android.assets_loader import resolve_bundled_model
+        local = resolve_bundled_model("embedder")
+    except Exception:
+        local = None
+
+    if local is not None:
+        model = SentenceTransformer(str(local), trust_remote_code=True, local_files_only=True)
+    else:
+        model = SentenceTransformer("intfloat/multilingual-e5-small", trust_remote_code=True)
+
+    extractor = PdfTextExtractor()
+    chunker = Chunker()
+
+    # ------------------------------------------------------------------
+    # Count total pages (for progress reporting)
+    # ------------------------------------------------------------------
+    _doc = fitz.open(str(pdf_path))
+    total_pages = len(_doc)
+    _doc.close()
+
+    # ------------------------------------------------------------------
+    # Extract paragraphs grouped by page
+    # ------------------------------------------------------------------
+    pages_data: dict[int, list] = {}
+    for page_num, heading, para in extractor.extract_with_structure(pdf_path):
+        pages_data.setdefault(page_num, []).append((heading, para))
+
+    all_chunks: list[Chunk] = []
+    chunks_added = 0
+
+    for page_idx, (page_num, paras) in enumerate(sorted(pages_data.items())):
+        if should_stop and should_stop[0]:
+            break
+        for heading, para in paras:
+            for chunk in chunker.chunk_paragraph(para, pdf_path.name, page_num, heading):
+                if not is_low_quality_chunk(chunk.text):
+                    all_chunks.append(chunk)
+        if progress_callback:
+            progress_callback({
+                "source": pdf_path.name,
+                "page_index": page_idx + 1,
+                "total_pages": total_pages,
+                "chunks_added": chunks_added,
+                "done": False,
+            })
+
+    if not all_chunks:
+        if progress_callback:
+            progress_callback({
+                "source": pdf_path.name,
+                "page_index": total_pages,
+                "total_pages": total_pages,
+                "chunks_added": 0,
+                "done": True,
+            })
+        return 0
+
+    # ------------------------------------------------------------------
+    # Embed in batches of 64
+    # ------------------------------------------------------------------
+    texts = [c.text for c in all_chunks]
+    _BATCH = 64
+    records = []
+
+    for i in range(0, len(texts), _BATCH):
+        if should_stop and should_stop[0]:
+            break
+        batch_texts = texts[i:i + _BATCH]
+        batch_chunks = all_chunks[i:i + _BATCH]
+        embs = model.encode(
+            batch_texts,
+            show_progress_bar=False,
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+            device="cpu",
+        )
+        for chunk, emb in zip(batch_chunks, embs):
+            payload = f"{chunk.source}:{chunk.page}:{chunk.chunk_index}:{chunk.text[:200]}"
+            cid = hashlib.md5(payload.encode()).hexdigest()[:16]
+            records.append({
+                "id": cid,
+                "text": chunk.text,
+                "source": chunk.source,
+                "page": chunk.page,
+                "section": chunk.section,
+                "chunk_index": chunk.chunk_index,
+                "tokens": chunk.tokens_estimate,
+                "vector": emb.tolist(),
+            })
+        chunks_added = len(records)
+        if progress_callback:
+            progress_callback({
+                "source": pdf_path.name,
+                "page_index": total_pages,
+                "total_pages": total_pages,
+                "chunks_added": chunks_added,
+                "done": False,
+            })
+
+    # ------------------------------------------------------------------
+    # Write to LanceDB
+    # ------------------------------------------------------------------
+    if records:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        _schema = pa.schema([
+            pa.field("id", pa.string()),
+            pa.field("text", pa.string()),
+            pa.field("source", pa.string()),
+            pa.field("page", pa.int32()),
+            pa.field("section", pa.string()),
+            pa.field("chunk_index", pa.int32()),
+            pa.field("tokens", pa.int32()),
+            pa.field("vector", pa.list_(pa.float32(), 384)),
+        ])
+        _db = lancedb.connect(str(db_path))
+        if not _lancedb_has_table(_db, "chunks"):
+            _table = _db.create_table("chunks", schema=_schema)
+        else:
+            _table = _db.open_table("chunks")
+        _table.add(records)
+        logger.info("index_new_pdf_done", path=str(pdf_path), chunks=chunks_added)
+
+    if progress_callback:
+        progress_callback({
+            "source": pdf_path.name,
+            "page_index": total_pages,
+            "total_pages": total_pages,
+            "chunks_added": chunks_added,
+            "done": True,
+        })
+    return chunks_added
 
 
 if __name__ == "__main__":
