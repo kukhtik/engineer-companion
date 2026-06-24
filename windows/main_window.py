@@ -1,10 +1,18 @@
 """Windows Desktop UI: PySide6 RAG companion.
 
-Layout: single window, left sidebar (sources list), right area split vertically:
-- top: search bar + results list
-- bottom: chat panel (markdown-ish display)
+Layout: single window, left sidebar (sources list + history controls),
+right area split vertically:
+- top: chat log with bookmark/filter bar
+- bottom: SINGLE unified ask input (replaces the old dual search_edit + chat_input)
 
-Design: impeccable-ui dribbble-dark tokens applied via Qt Stylesheet.
+Phase 1 changes:
+- Min size lowered to 960x640 (was 1200x800)
+- Unified single ask input (chat_input at bottom is the one true entry point)
+- search_edit / search_btn kept as shims pointing to chat_input / send_btn for
+  backward-compat with existing tests
+- ThemeManager wired at startup (default DARK; persists across runs)
+- "Вид -> Тема" menu for live dark/light switching without restart
+- app_paths.ensure_seeded() + app_paths.db_path() used for default DB
 """
 
 import html
@@ -17,7 +25,7 @@ from typing import Any
 from PySide6.QtCore import Qt, QThread, Signal, QUrl
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
-    QListWidget, QListWidgetItem, QMainWindow, QMenuBar, QMessageBox,
+    QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
     QPushButton, QTextBrowser, QSplitter, QVBoxLayout, QWidget,
 )
 
@@ -26,17 +34,16 @@ _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO))
 
 from core.query import RAGQueryPipeline  # noqa: E402
-from design.tokens import DribbbleDarkQt  # noqa: E402
+from design.tokens import DribbbleDarkQt  # noqa: E402  (backward-compat import kept)
+from windows.app_paths import db_path as _default_db_path, ensure_seeded  # noqa: E402
 from windows.settings_dialog import SettingsDialog, load_settings, save_settings  # noqa: E402
+from windows.theme import ThemeManager  # noqa: E402
 
 
 def _markdownish_to_html(text: str) -> str:
     """Lightweight conversion: bold, bullet lists, newlines."""
-    # Escape HTML entities
     text = html.escape(text)
-    # Bold: *text* -> <b>text</b>
     text = re.sub(r"\*(.+?)\*", r"<b>\1</b>", text)
-    # Bullet lists: lines starting with "* " or "- " -> <ul><li>
     lines = text.split("\n")
     out: list[str] = []
     in_list = False
@@ -100,17 +107,14 @@ class ChatHistory:
     def prune(self) -> None:
         """Remove oldest non-bookmarked entries if over limit."""
         while len(self.entries) > self.max_entries:
-            # Find oldest non-bookmarked
             for i, e in enumerate(self.entries):
                 if not e.get("bookmarked", False):
                     self.entries.pop(i)
                     break
             else:
-                # All bookmarked — remove oldest anyway
                 self.entries.pop(0)
 
     def _prune(self) -> None:
-        """Auto-prune without explicit call in add()."""
         self.prune()
 
     def format_html(self, bookmarks_only: bool = False, search_term: str = "") -> str:
@@ -166,16 +170,25 @@ class CompanionWindow(QMainWindow):
         self.worker: QueryWorker | None = None
         self.history = ChatHistory(Path.home() / ".engineer-companion" / "history.json")
         self.setWindowTitle("Engineer Companion")
-        self.setMinimumSize(1200, 800)
+        self.setMinimumSize(960, 640)   # Phase 1: reduced from 1200x800
         self.settings = load_settings()
+
+        # Theme manager — persists preference; defaults to DARK
+        self._theme_manager = ThemeManager()
+
         self._setup_menu()
         self._build_ui()
         self._apply_tokens()
         self._restore_history()
 
+    # ------------------------------------------------------------------
+    # Menu
+    # ------------------------------------------------------------------
+
     def _setup_menu(self) -> None:
         menubar = self.menuBar()
 
+        # File menu
         file_menu = menubar.addMenu("Файл")
         export_action = file_menu.addAction("Экспорт в Markdown...")
         export_action.triggered.connect(self._on_export_chat)
@@ -195,6 +208,26 @@ class CompanionWindow(QMainWindow):
                 "В собранном EXE-файле OCR отключён — запустите из источника для индексации."
             )
 
+        # View menu — theme switcher
+        view_menu = menubar.addMenu("Вид")
+        theme_menu = view_menu.addMenu("Тема")
+        dark_action = theme_menu.addAction("Тёмная (Dark)")
+        dark_action.triggered.connect(lambda: self._on_set_theme("dark"))
+        light_action = theme_menu.addAction("Светлая (Light)")
+        light_action.triggered.connect(lambda: self._on_set_theme("light"))
+
+    # ------------------------------------------------------------------
+    # Theme switching
+    # ------------------------------------------------------------------
+
+    def _on_set_theme(self, name: str) -> None:
+        app = QApplication.instance()
+        self._theme_manager.set_theme(name, app)
+
+    # ------------------------------------------------------------------
+    # Dialogs
+    # ------------------------------------------------------------------
+
     def _on_open_ocr(self) -> None:
         from windows.ocr_dialog import OCRDialog
         dlg = OCRDialog(self)
@@ -204,24 +237,18 @@ class CompanionWindow(QMainWindow):
         dlg = SettingsDialog(self, current=self.settings)
         if dlg.exec():
             self.settings = dlg.get_settings()
-            # Rebuild pipeline if settings changed
-            db_path = self.settings.get("db_path")
-            llm_path = self.settings.get("llm_model_path")
-            if db_path:
-                p = Path(db_path)
-                if not p.exists():
-                    db_path = ""
-            if llm_path:
-                p = Path(llm_path)
-                if not p.exists():
-                    llm_path = ""
+            db = self.settings.get("db_path") or ""
+            llm_path = self.settings.get("llm_model_path") or ""
+            if db and not Path(db).exists():
+                db = ""
+            if llm_path and not Path(llm_path).exists():
+                llm_path = ""
 
-            from core.query import RAGQueryPipeline
             if llm_path:
                 try:
                     self.pipeline = RAGQueryPipeline(
-                        db_path=Path(db_path) if db_path else _REPO / "assets" / "db" / "engineer.db",
-                        llm_model_path=Path(llm_path) if llm_path else None,
+                        db_path=Path(db) if db else _default_db_path(),
+                        llm_model_path=Path(llm_path),
                         top_k=self.settings.get("top_k", 8),
                         max_tokens=self.settings.get("max_tokens", 512),
                         temperature=self.settings.get("temperature", 0.3),
@@ -229,7 +256,6 @@ class CompanionWindow(QMainWindow):
                         llm_n_threads=2,
                     )
                 except Exception as exc:
-                    from PySide6.QtWidgets import QMessageBox
                     QMessageBox.warning(self, "Ошибка", f"Не удалось загрузить модель:\n{exc}")
                     self.pipeline = None
             else:
@@ -249,7 +275,6 @@ class CompanionWindow(QMainWindow):
                 and (not search_term or search_term.lower() in e.get("query", "").lower()
                      or search_term.lower() in e.get("answer", "").lower())
             ]
-        from PySide6.QtWidgets import QFileDialog
         path, _ = QFileDialog.getSaveFileName(
             self, "Сохранить чат как Markdown", "engineer-companion-chat.md",
             "Markdown (*.md);;JSON (*.json);;Все файлы (*)"
@@ -258,7 +283,6 @@ class CompanionWindow(QMainWindow):
             return
         ext = Path(path).suffix.lower()
         if ext == ".json":
-            import json
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(entries, f, ensure_ascii=False, indent=2)
         else:
@@ -274,6 +298,10 @@ class CompanionWindow(QMainWindow):
                 f.writelines(lines)
         QMessageBox.information(self, "Экспорт", f"Сохранено: {path} ({len(entries)} записей)")
 
+    # ------------------------------------------------------------------
+    # UI construction
+    # ------------------------------------------------------------------
+
     def _build_ui(self) -> None:
         central = QWidget()
         self.setCentralWidget(central)
@@ -281,20 +309,15 @@ class CompanionWindow(QMainWindow):
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(12)
 
-        # ---- Left sidebar: search bar + results list ----
+        # ---- Left sidebar: sources panel + history controls ----
         left = QWidget()
         left_v = QVBoxLayout(left)
         left_v.setContentsMargins(0, 0, 0, 0)
         left_v.setSpacing(8)
 
-        self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("Введите вопрос по TrueBeam / VitalBeam...")
-        self.search_edit.returnPressed.connect(self._on_search)
-        left_v.addWidget(self.search_edit)
-
-        self.search_btn = QPushButton("Найти")
-        self.search_btn.clicked.connect(self._on_search)
-        left_v.addWidget(self.search_btn)
+        sources_label = QLabel("Источники")
+        sources_label.setObjectName("muted")
+        left_v.addWidget(sources_label)
 
         self.results_list = QListWidget()
         self.results_list.setSpacing(4)
@@ -303,27 +326,25 @@ class CompanionWindow(QMainWindow):
 
         self.meta_label = QLabel()
         self.meta_label.setObjectName("muted")
+        left_v.addWidget(self.meta_label)
 
         self.clear_btn = QPushButton("🗑 Очистить историю")
         self.clear_btn.clicked.connect(self._on_clear_history)
-        left_v.addWidget(self.meta_label)
         left_v.addWidget(self.clear_btn)
 
-        # ---- Prune button ----
         self.prune_btn = QPushButton("✂️ Удалить старые (>200)")
         self.prune_btn.clicked.connect(self._on_prune_history)
         left_v.addWidget(self.prune_btn)
 
-        # ---- Right area: chat splitter ----
+        # ---- Right area: chat log + unified ask input ----
         right = QSplitter(Qt.Vertical)
 
-        # Top: chat log + controls
+        # Top: chat log with filter bar
         chat_top = QWidget()
         chat_top_v = QVBoxLayout(chat_top)
         chat_top_v.setContentsMargins(0, 0, 0, 0)
         chat_top_v.setSpacing(4)
 
-        # Filters row
         filter_row = QHBoxLayout()
         filter_row.setContentsMargins(0, 0, 0, 0)
         self.bookmarks_cb = QCheckBox("★ Только избранное")
@@ -342,19 +363,20 @@ class CompanionWindow(QMainWindow):
         self.chat_log.setHtml(
             '<div style="color:#7A7A7A;">'
             "Здесь появится ответ эксперта...<br>"
-            "Введите вопрос слева и нажмите Найти."
+            "Введите вопрос внизу и нажмите Отправить."
             "</div>"
         )
         chat_top_v.addWidget(self.chat_log, stretch=1)
         right.addWidget(chat_top)
 
+        # Bottom: UNIFIED single ask input
         bottom = QWidget()
         bottom_h = QHBoxLayout(bottom)
         bottom_h.setContentsMargins(0, 0, 0, 0)
         bottom_h.setSpacing(8)
 
         self.chat_input = QLineEdit()
-        self.chat_input.setPlaceholderText("Уточняющий вопрос...")
+        self.chat_input.setPlaceholderText("Введите вопрос по TrueBeam / VitalBeam...")
         self.chat_input.returnPressed.connect(self._on_search)
 
         self.send_btn = QPushButton("Отправить")
@@ -364,33 +386,54 @@ class CompanionWindow(QMainWindow):
         bottom_h.addWidget(self.chat_input, stretch=1)
         bottom_h.addWidget(self.send_btn)
         right.addWidget(bottom)
-        right.setSizes([600, 80])
+        right.setSizes([560, 80])
 
         outer_splitter = QSplitter(Qt.Horizontal)
         outer_splitter.addWidget(left)
         outer_splitter.addWidget(right)
-        outer_splitter.setSizes([420, 780])
+        outer_splitter.setSizes([300, 660])
         root.addWidget(outer_splitter)
 
+        # ---- Backward-compat shims ----
+        # Tests reference window.search_edit and window.search_btn;
+        # wire them to the unified widgets so nothing breaks.
+        self.search_edit = self.chat_input
+        self.search_btn = self.send_btn
+
+    # ------------------------------------------------------------------
+    # Theme / stylesheet
+    # ------------------------------------------------------------------
+
     def _apply_tokens(self) -> None:
-        tokens = DribbbleDarkQt()
-        self.setStyleSheet(tokens.as_stylesheet())
+        """Apply active theme via ThemeManager to the QApplication."""
+        app = QApplication.instance()
+        if app is not None:
+            self._theme_manager.apply(app)
+        else:
+            from design.tokens import as_stylesheet
+            self.setStyleSheet(as_stylesheet(self._theme_manager.get_theme_obj()))
+
+    # ------------------------------------------------------------------
+    # History
+    # ------------------------------------------------------------------
 
     def _restore_history(self) -> None:
         if self.history.entries:
             self.chat_log.setHtml(self.history.format_html())
 
+    # ------------------------------------------------------------------
+    # Query flow
+    # ------------------------------------------------------------------
+
     def _on_search(self) -> None:
-        text = self.search_edit.text().strip() or self.chat_input.text().strip()
+        text = self.chat_input.text().strip()
         if not text:
             return
         if self.pipeline is None:
             self.chat_log.append("[Ошибка: LLM pipeline не инициализирован]")
             return
 
-        self.search_btn.setEnabled(False)
         self.send_btn.setEnabled(False)
-        self.search_edit.clear()
         self.chat_input.clear()
         self.results_list.clear()
         self.meta_label.setText("Ищем...")
@@ -424,7 +467,6 @@ class CompanionWindow(QMainWindow):
         self.meta_label.setText("Ошибка")
 
     def _cleanup_worker(self) -> None:
-        self.search_btn.setEnabled(True)
         self.send_btn.setEnabled(True)
         self.worker = None
 
@@ -448,7 +490,7 @@ class CompanionWindow(QMainWindow):
         self.chat_log.setHtml(
             '<div style="color:#7A7A7A;">'
             "История очищена.<br>"
-            "Введите вопрос слева и нажмите Найти."
+            "Введите вопрос внизу и нажмите Отправить."
             "</div>"
         )
 
@@ -463,9 +505,9 @@ class CompanionWindow(QMainWindow):
     def _refresh_chat_log(self) -> None:
         bookmarks_only = self.bookmarks_cb.isChecked()
         search_term = self.history_search.text().strip()
-        html = self.history.format_html(bookmarks_only=bookmarks_only, search_term=search_term)
-        if html:
-            self.chat_log.setHtml(html)
+        content = self.history.format_html(bookmarks_only=bookmarks_only, search_term=search_term)
+        if content:
+            self.chat_log.setHtml(content)
         else:
             self.chat_log.setHtml('<div style="color:#7A7A7A;">Нет записей, соответствующих фильтру.</div>')
 
@@ -473,17 +515,24 @@ class CompanionWindow(QMainWindow):
 def main() -> None:
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument("--db-path", type=Path, default=_REPO / "assets" / "db" / "engineer.db")
-    ap.add_argument("--llm-path", type=Path, default=_REPO / "assets" / "models" / "gemma-3-4b-it-Q4_K_M.gguf")
+    ap.add_argument("--db-path", type=Path, default=None,
+                    help="Override DB path (default: app_paths.db_path())")
+    ap.add_argument("--llm-path", type=Path,
+                    default=_REPO / "assets" / "models" / "gemma-3-4b-it-Q4_K_M.gguf")
     ap.add_argument("--no-llm", action="store_true", help="Run without LLM (search-only mode)")
     args = ap.parse_args()
+
+    # Seed writable data dirs on first frozen run; no-op in dev
+    ensure_seeded()
+
+    effective_db = args.db_path or _default_db_path()
 
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
 
     pipeline = None
     if not args.no_llm and args.llm_path.exists():
-        pipeline = RAGQueryPipeline(db_path=args.db_path, llm_model_path=args.llm_path)
+        pipeline = RAGQueryPipeline(db_path=effective_db, llm_model_path=args.llm_path)
 
     w = CompanionWindow(pipeline=pipeline)
     w.show()

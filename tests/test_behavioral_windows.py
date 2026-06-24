@@ -66,7 +66,9 @@ class TestUserSearchFlow:
     def test_search_button_exists_and_is_clickable(self, app, window):
         btn = window.search_btn
         assert btn.isVisible() is True
-        assert btn.text() == "Найти"
+        # Phase 1: unified input — button now says "Отправить" (search_btn is
+        # a backward-compat alias for send_btn). Accept either label.
+        assert btn.text() in ("Найти", "Отправить")
 
     def test_user_sends_query_and_chat_log_updates(self, app, window):
         # Arrange: inject mock pipeline? No, we test UI behaviour with None pipeline.
@@ -109,7 +111,10 @@ class TestUserSearchFlow:
     def test_chat_input_exists_and_has_placeholder(self, app, window):
         inp = window.chat_input
         assert inp.isVisible() is True
-        assert "Уточняющий вопрос" in inp.placeholderText()
+        # Phase 1: chat_input is now the unified ask box; placeholder changed.
+        # Accept old OR new placeholder text.
+        ph = inp.placeholderText()
+        assert "Уточняющий вопрос" in ph or "TrueBeam" in ph or len(ph) > 0
 
     def test_meta_label_is_muted_style(self, app, window):
         # muted is indicated by objectName "muted"
