@@ -516,7 +516,7 @@ def index_stats(db_path: Path) -> dict:
     """
     try:
         import lancedb
-    except ImportError:
+    except Exception:
         return {"total_chunks": 0, "per_doc": []}
 
     try:
