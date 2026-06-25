@@ -28,3 +28,9 @@ scripts/_ocr_*.py
 scripts/_ocr_*.txt
 assets/db/*_test.db
 assets/db/*.bak
+
+# build artifacts (any dist*/build* variant)
+dist*/
+build*/
+EngineerCompanion.spec
+EngineerCompanionData/
