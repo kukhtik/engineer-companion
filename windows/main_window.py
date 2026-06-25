@@ -168,6 +168,7 @@ class QueryWorker(QThread):
     """Off-thread RAG query so UI stays responsive."""
 
     result_ready = Signal(dict)
+    event_received = Signal(dict)
     error = Signal(str)
 
     def __init__(self, pipeline: RAGQueryPipeline, query: str) -> None:
@@ -177,10 +178,17 @@ class QueryWorker(QThread):
 
     def run(self) -> None:
         try:
-            result = self.pipeline.ask(self.query)
+            if hasattr(self.pipeline, "ask_streaming"):
+                result = self.pipeline.ask_streaming(self.query, self._emit_event)
+            else:
+                # Fallback for pipeline objects that only implement ask()
+                result = self.pipeline.ask(self.query)
             self.result_ready.emit(result)
         except Exception as exc:
             self.error.emit(str(exc))
+
+    def _emit_event(self, event: dict) -> None:
+        self.event_received.emit(event)
 
 
 class CompanionWindow(QMainWindow):
@@ -189,6 +197,10 @@ class CompanionWindow(QMainWindow):
         self.pipeline = pipeline
         self.worker: QueryWorker | None = None
         self._meta_pulse_going: bool = False
+        self._dot_pulse_going: bool = False
+        self._streaming_answer: str = ""
+        self._streaming_placeholder_added: bool = False
+        self._current_query: str = ""
         self.history = ChatHistory(Path.home() / ".engineer-companion" / "history.json")
         self.setWindowTitle("Engineer Companion")
         self.setMinimumSize(960, 640)   # Phase 1: reduced from 1200x800
@@ -435,6 +447,25 @@ class CompanionWindow(QMainWindow):
             "</div>"
         )
         chat_top_v.addWidget(self.chat_log, stretch=1)
+
+        # ---- Live status line (activity indicator) ----
+        status_row = QHBoxLayout()
+        status_row.setContentsMargins(0, 2, 0, 2)
+        status_row.setSpacing(6)
+
+        self._status_dot = QLabel("●")
+        self._status_dot.setObjectName("statusDot")
+        self._status_dot.setFixedWidth(14)
+        self._status_dot.hide()
+
+        self._status_label = QLabel("")
+        self._status_label.setObjectName("muted")
+        self._status_label.hide()
+
+        status_row.addWidget(self._status_dot)
+        status_row.addWidget(self._status_label, stretch=1)
+        chat_top_v.addLayout(status_row)
+
         right.addWidget(chat_top)
 
         # Bottom: UNIFIED single ask input
@@ -541,6 +572,90 @@ class CompanionWindow(QMainWindow):
         if isinstance(effect, QGraphicsOpacityEffect):
             effect.setOpacity(1.0)
 
+    def _start_status_indicator(self, text: str) -> None:
+        """Show the live status line and start pulsing the dot."""
+        self._status_label.setText(text)
+        self._status_label.show()
+        self._status_dot.show()
+        self._dot_pulse_going = True
+        self._status_dot.setStyleSheet("color: #4CAF50;")
+        self._pulse_dot()
+
+    def _pulse_dot(self) -> None:
+        if not getattr(self, "_dot_pulse_going", False):
+            return
+        from windows.anim import fade_in, fade_out
+        self._dot_anim = fade_out(
+            self._status_dot, duration=500, start_value=1.0, end_value=0.2,
+            on_done=self._pulse_dot_in,
+        )
+
+    def _pulse_dot_in(self) -> None:
+        if not getattr(self, "_dot_pulse_going", False):
+            return
+        from windows.anim import fade_in
+        self._dot_anim = fade_in(
+            self._status_dot, duration=500, start_value=0.2, end_value=1.0,
+        )
+        self._dot_anim.finished.connect(self._pulse_dot)
+
+    def _stop_status_indicator(self) -> None:
+        """Hide the live status line and stop pulsing."""
+        self._dot_pulse_going = False
+        self._status_label.hide()
+        self._status_dot.hide()
+
+    def _set_status(self, text: str) -> None:
+        """Update the live status text without stopping the animation."""
+        self._status_label.setText(text)
+
+    def _on_pipeline_event(self, event: dict) -> None:
+        """Handle a pipeline stage event from the worker thread."""
+        stage = event.get("stage", "")
+        if stage == "embed":
+            self._set_status("Поиск по документации…")
+        elif stage == "search":
+            found = event.get("found", 0)
+            self._set_status(f"Найдено фрагментов: {found}")
+        elif stage == "rerank":
+            n = event.get("from", 0)
+            m = event.get("to", 0)
+            self._set_status(f"Реранжирование: {n} → {m}")
+        elif stage == "prompt":
+            k = event.get("sources", 0)
+            self._set_status(f"Контекст: {k} источников")
+        elif stage == "generate_start":
+            self._set_status("Генерация ответа…")
+            self._streaming_answer = ""
+            self._streaming_placeholder_added = False
+        elif stage == "token":
+            chunk = event.get("text", "")
+            self._streaming_answer += chunk
+            self._append_streaming_token()
+        elif stage == "done":
+            # Status line handled by _on_result; just update meta count
+            pass
+        elif stage == "error":
+            self._set_status(f"Ошибка: {event.get('message', '')}")
+
+    def _append_streaming_token(self) -> None:
+        """Append the current streamed answer to the chat log live."""
+        # Build a temporary HTML block showing the streaming answer so far
+        escaped = html.escape(self._streaming_answer)
+        stream_html = (
+            f'<hr><div style="color:#7A7A7A;font-size:12px;margin-bottom:4px;">'
+            f'Вопрос: {html.escape(self._current_query)}</div>'
+            f'<div style="margin-bottom:8px;">{escaped.replace(chr(10), "<br>")}'
+            f'<span style="color:#888;">▌</span></div>'
+        )
+        # Show history + streaming block; replace entire content
+        base_html = self.history.format_html()
+        self.chat_log.setHtml(base_html + stream_html)
+        # Scroll to bottom
+        sb = self.chat_log.verticalScrollBar()
+        if sb:
+            sb.setValue(sb.maximum())
+
     def _on_search(self) -> None:
         text = self.chat_input.text().strip()
         if not text:
@@ -554,10 +669,14 @@ class CompanionWindow(QMainWindow):
         self.results_list.clear()
         self.meta_label.setText("Ищем...")
         self._start_meta_pulse()
+        self._start_status_indicator("Инициализация…")
+        self._streaming_answer = ""
+        self._streaming_placeholder_added = False
 
         self.worker = QueryWorker(self.pipeline, text)
         self._current_query = text
         self.worker.result_ready.connect(self._on_result)
+        self.worker.event_received.connect(self._on_pipeline_event)
         self.worker.error.connect(self._on_error)
         self.worker.finished.connect(self._cleanup_worker)
         self.worker.start()
@@ -567,6 +686,7 @@ class CompanionWindow(QMainWindow):
         sources = result.get("sources", [])
 
         self._stop_meta_pulse()
+        self._stop_status_indicator()
 
         self.results_list.clear()
         for src in sources:
@@ -576,6 +696,10 @@ class CompanionWindow(QMainWindow):
             self.results_list.addItem(item)
 
         self.meta_label.setText(f"Найдено источников: {len(sources)}")
+        self._status_label.setText("Готово")
+        self._status_label.show()
+        self._status_dot.hide()
+        QTimer.singleShot(1800, lambda: fade_out(self._status_label, duration=400, on_done=self._status_label.hide))
 
         source_meta = [{"source": s["source"], "page": s["page"], "section": s["section"]} for s in sources]
         self.history.add(self._current_query, answer, source_meta)
@@ -591,6 +715,9 @@ class CompanionWindow(QMainWindow):
 
     def _on_error(self, msg: str) -> None:
         self._stop_meta_pulse()
+        self._stop_status_indicator()
+        self._set_status(f"Ошибка: {html.escape(msg)}")
+        self._status_label.show()
         self.chat_log.append(f'[Ошибка: {html.escape(msg)}]')
         self.meta_label.setText("Ошибка")
 

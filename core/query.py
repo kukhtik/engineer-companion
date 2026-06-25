@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import structlog
 
@@ -105,6 +105,42 @@ class Retriever:
             ranked = [(s, h) for s, h in zip(scores, hits)]
             ranked.sort(key=lambda x: x[0], reverse=True)
             hits = [h for _, h in ranked[:self.rerank_top_k]]
+
+        return hits
+
+    def search_streaming(
+        self, query: str, on_event: Callable[[dict], None]
+    ) -> list[SearchResult]:
+        """Like search(), but fires progress events via on_event at key steps."""
+        on_event({"stage": "embed"})
+        model = self._get_model()
+        emb = model.encode(query, normalize_embeddings=True, device="cpu").tolist()
+
+        table = self._get_table()
+        results = table.search(emb).metric("cosine").limit(self.top_k).to_list()
+        hits = [
+            SearchResult(
+                text=r["text"],
+                source=r["source"],
+                page=r["page"],
+                section=r["section"],
+                score=r.get("_distance", 0.0),
+            )
+            for r in results
+        ]
+
+        on_event({"stage": "search", "found": len(hits)})
+
+        # Rerank if configured
+        reranker = self._get_reranker()
+        if reranker and hits:
+            n_before = len(hits)
+            pairs = [(query, h.text) for h in hits]
+            scores = reranker.predict(pairs)
+            ranked = [(s, h) for s, h in zip(scores, hits)]
+            ranked.sort(key=lambda x: x[0], reverse=True)
+            hits = [h for _, h in ranked[:self.rerank_top_k]]
+            on_event({"stage": "rerank", "from": n_before, "to": len(hits)})
 
         return hits
 
@@ -216,6 +252,68 @@ class RAGQueryPipeline:
             "prompt_tokens": response.get("usage", {}).get("prompt_tokens", 0),
             "completion_tokens": response.get("usage", {}).get("completion_tokens", 0),
         }
+
+    def ask_streaming(
+        self, query: str, on_event: Callable[[dict], None]
+    ) -> dict[str, Any]:
+        """Like ask(), but fires progress/token events via on_event throughout the pipeline.
+
+        Events fired in order:
+          {"stage": "embed"}                          — before embedding
+          {"stage": "search", "found": N}             — after lancedb search, before rerank
+          {"stage": "rerank", "from": N, "to": M}    — only if reranking actually runs
+          {"stage": "prompt", "sources": K}           — after prompt is built
+          {"stage": "generate_start"}                 — before LLM call
+          {"stage": "token", "text": chunk_text}      — for each streamed token
+          {"stage": "done", "answer": ..., "sources": ...,
+           "prompt_tokens": 0, "completion_tokens": N} — final summary
+
+        Returns the same final dict that is emitted in the "done" event.
+        """
+        hits = self.retriever.search_streaming(query, on_event)
+        prompt = self.builder.build(query, hits)
+        context_meta = [
+            {"source": h.source, "page": h.page, "section": h.section}
+            for h in hits
+        ]
+
+        on_event({"stage": "prompt", "sources": len(hits)})
+
+        llm = self._get_llm()
+        if llm is None:
+            result: dict[str, Any] = {
+                "answer": "[LLM не загружена. Проверьте путь к модели.]",
+                "sources": context_meta,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+            }
+            on_event({"stage": "done", **result})
+            return result
+
+        on_event({"stage": "generate_start"})
+
+        tokens: list[str] = []
+        stream = llm.create_completion(
+            prompt=prompt,
+            max_tokens=self.max_tokens,
+            temperature=self.temperature,
+            stop=["</s>", "USER:", "ВОПРОС:"],
+            stream=True,
+        )
+        for chunk in stream:
+            chunk_text = chunk["choices"][0]["text"]
+            tokens.append(chunk_text)
+            on_event({"stage": "token", "text": chunk_text})
+
+        full_answer = "".join(tokens).strip()
+        result = {
+            "answer": full_answer,
+            "sources": context_meta,
+            "prompt_tokens": 0,
+            "completion_tokens": len(tokens),
+        }
+        on_event({"stage": "done", **result})
+        return result
 
 
 if __name__ == "__main__":
