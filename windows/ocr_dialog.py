@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, Signal, QEvent
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QProgressBar, QTableWidget, QTableWidgetItem, QComboBox,
@@ -248,6 +248,7 @@ class OCRDialog(QDialog):
         self._reindex_worker: Optional[ReindexWorker] = None
         self._stop_flag: list = [False]
         self._stats_cache: list = []
+        self._shown_once = False
 
         self._build_ui()
         self._apply_style()
@@ -273,7 +274,8 @@ class OCRDialog(QDialog):
         root.addWidget(doc_group)
 
         # ---- Section 2: OCR progress ----
-        prog_group = QGroupBox("Прогресс OCR")
+        self._prog_group = QGroupBox("Прогресс OCR")
+        prog_group = self._prog_group
         prog_v = QVBoxLayout(prog_group)
         prog_v.setSpacing(6)
 
@@ -337,6 +339,21 @@ class OCRDialog(QDialog):
         table_v.addWidget(refresh_btn)
 
         root.addWidget(table_group, stretch=1)
+
+    # ------------------------------------------------------------------
+    # Animation
+    # ------------------------------------------------------------------
+
+    def showEvent(self, event: QEvent) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        if not self._shown_once:
+            self._shown_once = True
+            from windows.anim import fade_in
+            fade_in(self, duration=200)
+
+    # ------------------------------------------------------------------
+    # Style
+    # ------------------------------------------------------------------
 
     def _apply_style(self) -> None:
         tokens = DribbbleDarkQt()
@@ -448,6 +465,9 @@ class OCRDialog(QDialog):
         self.status_label.setText(f"Запущен OCR: {stat['filename']}")
 
         self._ocr_worker.start()
+        # Subtle fade-in on the progress group to draw attention
+        from windows.anim import fade_in
+        fade_in(self._prog_group, duration=200)
 
     def _on_stop(self) -> None:
         self._stop_flag[0] = True

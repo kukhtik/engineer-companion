@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QEvent
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -117,9 +117,21 @@ class SettingsDialog(QDialog):
             self.current.update(current)
 
         self._theme_manager = theme_manager
+        self._shown_once = False
 
         self._build_ui()
         self._populate()
+
+    # ------------------------------------------------------------------
+    # Animation
+    # ------------------------------------------------------------------
+
+    def showEvent(self, event: QEvent) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        if not self._shown_once:
+            self._shown_once = True
+            from windows.anim import fade_in
+            fade_in(self.tabs, duration=200)
 
     # ------------------------------------------------------------------
     # UI construction

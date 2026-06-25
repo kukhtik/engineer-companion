@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, Signal, QEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -100,6 +100,7 @@ class LibraryDialog(QDialog):
         self._db_path: Path = db_path or _default_db_path()
         self._worker: Optional[IndexWorker] = None
         self._stop_flag: list = [False]
+        self._shown_once = False
 
         self._build_ui()
         self._apply_style()
@@ -207,6 +208,22 @@ class LibraryDialog(QDialog):
         add_v.addWidget(self.status_label)
 
         root.addWidget(add_group)
+
+    # ------------------------------------------------------------------
+    # Animation
+    # ------------------------------------------------------------------
+
+    def showEvent(self, event: QEvent) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        if not self._shown_once:
+            self._shown_once = True
+            from windows.anim import fade_in
+            # Fade in the whole dialog content (self) on first show
+            fade_in(self, duration=200)
+
+    # ------------------------------------------------------------------
+    # Style
+    # ------------------------------------------------------------------
 
     def _apply_style(self) -> None:
         """Apply the active application theme (matches the rest of the UI)."""

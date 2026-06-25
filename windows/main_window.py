@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from PySide6.QtCore import Qt, QThread, Signal, QUrl
+from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
     QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
@@ -50,6 +50,7 @@ from design.tokens import DribbbleDarkQt  # noqa: E402  (backward-compat import 
 from windows.app_paths import db_path as _default_db_path, ensure_seeded  # noqa: E402
 from windows.settings_dialog import SettingsDialog, load_settings, save_settings  # noqa: E402
 from windows.theme import ThemeManager  # noqa: E402
+from windows.anim import fade_in, fade_out  # noqa: E402
 
 
 def _markdownish_to_html(text: str) -> str:
@@ -187,6 +188,7 @@ class CompanionWindow(QMainWindow):
         super().__init__()
         self.pipeline = pipeline
         self.worker: QueryWorker | None = None
+        self._meta_pulse_going: bool = False
         self.history = ChatHistory(Path.home() / ".engineer-companion" / "history.json")
         self.setWindowTitle("Engineer Companion")
         self.setMinimumSize(960, 640)   # Phase 1: reduced from 1200x800
@@ -247,8 +249,21 @@ class CompanionWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_set_theme(self, name: str) -> None:
+        """Switch theme with a subtle crossfade of the central widget.
+
+        Falls back to an immediate switch if the central widget isn't visible
+        (e.g. headless tests, or called before the window is shown) so that the
+        stylesheet is always applied synchronously in that case.
+        """
         app = QApplication.instance()
-        self._theme_manager.set_theme(name, app)
+        central = self.centralWidget()
+        if central is not None and central.isVisible():
+            def _do_switch() -> None:
+                self._theme_manager.set_theme(name, app)
+                fade_in(central, duration=200)
+            fade_out(central, duration=120, on_done=_do_switch)
+        else:
+            self._theme_manager.set_theme(name, app)
 
     # ------------------------------------------------------------------
     # Dialogs
@@ -490,6 +505,40 @@ class CompanionWindow(QMainWindow):
     # Query flow
     # ------------------------------------------------------------------
 
+    def _start_meta_pulse(self) -> None:
+        """Subtle repeating opacity pulse on meta_label while query is running."""
+        self._meta_pulse_anim = fade_in(
+            self.meta_label, duration=600, start_value=0.4, end_value=1.0
+        )
+        self._meta_pulse_going = True
+
+        def _pulse_again() -> None:
+            if not self._meta_pulse_going:
+                return
+            self._meta_pulse_anim = fade_out(
+                self.meta_label, duration=600, start_value=1.0, end_value=0.4,
+                on_done=_pulse_in,
+            )
+
+        def _pulse_in() -> None:
+            if not self._meta_pulse_going:
+                return
+            self._meta_pulse_anim = fade_in(
+                self.meta_label, duration=600, start_value=0.4, end_value=1.0
+            )
+            self._meta_pulse_anim.finished.connect(_pulse_again)
+
+        self._meta_pulse_anim.finished.connect(_pulse_again)
+
+    def _stop_meta_pulse(self) -> None:
+        """Stop pulse and restore meta_label to full opacity."""
+        self._meta_pulse_going = False
+        # Restore opacity immediately without animation jitter
+        from PySide6.QtWidgets import QGraphicsOpacityEffect
+        effect = self.meta_label.graphicsEffect()
+        if isinstance(effect, QGraphicsOpacityEffect):
+            effect.setOpacity(1.0)
+
     def _on_search(self) -> None:
         text = self.chat_input.text().strip()
         if not text:
@@ -502,6 +551,7 @@ class CompanionWindow(QMainWindow):
         self.chat_input.clear()
         self.results_list.clear()
         self.meta_label.setText("Ищем...")
+        self._start_meta_pulse()
 
         self.worker = QueryWorker(self.pipeline, text)
         self._current_query = text
@@ -514,6 +564,8 @@ class CompanionWindow(QMainWindow):
         answer = result.get("answer", "")
         sources = result.get("sources", [])
 
+        self._stop_meta_pulse()
+
         self.results_list.clear()
         for src in sources:
             item_text = f"{src['source']}    стр.{src['page']}    [{src['section'][:40]}]"
@@ -525,9 +577,18 @@ class CompanionWindow(QMainWindow):
 
         source_meta = [{"source": s["source"], "page": s["page"], "section": s["section"]} for s in sources]
         self.history.add(self._current_query, answer, source_meta)
+        # Update HTML immediately (keeps tests deterministic), then fade in
+        # the chat log so the new answer appears with a subtle enter animation.
+        # (Enter-only: no fade-out before setHtml — avoids async timing issues.)
+        self._update_chat_log_html()
+
+    def _update_chat_log_html(self) -> None:
+        """Set chat log HTML then fade in — enter-only animation."""
         self.chat_log.setHtml(self.history.format_html())
+        fade_in(self.chat_log, duration=200)
 
     def _on_error(self, msg: str) -> None:
+        self._stop_meta_pulse()
         self.chat_log.append(f'[Ошибка: {html.escape(msg)}]')
         self.meta_label.setText("Ошибка")
 
