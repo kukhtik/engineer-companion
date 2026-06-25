@@ -19,8 +19,6 @@ from PySide6.QtWidgets import (
 _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO))
 
-from design.tokens import DribbbleDarkQt
-
 CACHE_PATH = _REPO / "scripts" / "ocr_cache.jsonl"
 
 
@@ -351,8 +349,15 @@ class OCRDialog(QDialog):
     # ------------------------------------------------------------------
 
     def _apply_style(self) -> None:
-        tokens = DribbbleDarkQt()
-        self.setStyleSheet(tokens.as_stylesheet())
+        """Inherit the active application theme (no per-dialog override)."""
+        app = QApplication.instance()
+        if app is not None and not app.styleSheet():
+            # Standalone testing fallback — no app stylesheet yet
+            try:
+                from design.tokens import DARK
+                self.setStyleSheet(DARK.as_stylesheet())
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Stats and combo population

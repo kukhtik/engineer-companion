@@ -41,6 +41,7 @@ class Theme:
 
     # Accents
     accent_primary: str    # main interactive accent (yellow on dark, blue on light)
+    accent_ink: str        # text colour drawn ON top of accent_primary fill
     accent_danger: str     # destructive / error accent (red on both themes)
 
     # Typography
@@ -60,7 +61,7 @@ DARK = Theme(
     name="dark",
     # Backgrounds — near-black base
     bg_base="#0a0a0a",
-    bg_surface="#141414",
+    bg_surface="#151515",
     bg_elevated="#1d1d1d",
     bg_row_hover="#1a1a1a",
     bg_row_selected="#262626",
@@ -69,9 +70,10 @@ DARK = Theme(
     # Text
     text_primary="#F5F5F2",
     text_secondary="#B6B6AE",
-    text_muted="#7A7A7A",
+    text_muted="#8a8a82",
     # Accents
     accent_primary="#F5C518",   # yellow
+    accent_ink="#0a0a0a",       # dark text on yellow
     accent_danger="#E5382B",    # red
 )
 
@@ -86,11 +88,12 @@ LIGHT = Theme(
     # Borders
     border="#D8DEE6",
     # Text
-    text_primary="#1E5FA8",     # blue
+    text_primary="#173A5E",     # blue-ink, readable
     text_secondary="#3A6FB0",
-    text_muted="#7E8CA0",
+    text_muted="#6B7B90",
     # Accents
     accent_primary="#1E88E5",   # blue
+    accent_ink="#FFFFFF",       # white text on blue
     accent_danger="#D33A2C",    # red
 )
 
@@ -161,17 +164,16 @@ QPushButton[destructive="true"] {{
 }}
 QPushButton[destructive="true"]:hover {{
     background-color: {t.accent_danger};
-    color: {t.bg_base};
+    color: #ffffff;
 }}
 QPushButton[primary="true"] {{
     background-color: {t.accent_primary};
-    color: {t.bg_base};
+    color: {t.accent_ink};
     border: 1px solid {t.accent_primary};
-    font-weight: 600;
+    font-weight: 700;
 }}
 QPushButton[primary="true"]:hover {{
     background-color: {t.accent_primary};
-    opacity: 0.9;
     border-color: {t.accent_primary};
 }}
 QPushButton[primary="true"]:pressed {{
@@ -458,6 +460,17 @@ QGroupBox::title {{
     subcontrol-position: top left;
     left: 8px;
     padding: 0 4px;
+}}
+
+/* ---- Selection ---- */
+QTextEdit, QPlainTextEdit, QTextBrowser, QLineEdit, QComboBox {{
+    selection-background-color: {t.accent_primary};
+    selection-color: {t.accent_ink};
+}}
+
+/* ---- Links ---- */
+QLabel[openExternalLinks="true"] {{
+    color: {t.accent_primary};
 }}
 """
 
