@@ -163,6 +163,26 @@ QPushButton[destructive="true"]:hover {{
     background-color: {t.accent_danger};
     color: {t.bg_base};
 }}
+QPushButton[primary="true"] {{
+    background-color: {t.accent_primary};
+    color: {t.bg_base};
+    border: 1px solid {t.accent_primary};
+    font-weight: 600;
+}}
+QPushButton[primary="true"]:hover {{
+    background-color: {t.accent_primary};
+    opacity: 0.9;
+    border-color: {t.accent_primary};
+}}
+QPushButton[primary="true"]:pressed {{
+    background-color: {t.accent_primary};
+}}
+QPushButton[primary="true"]:disabled {{
+    background-color: {t.bg_elevated};
+    color: {t.text_muted};
+    border-color: {t.border};
+    font-weight: normal;
+}}
 
 /* ---- Lists ---- */
 QListView, QListWidget {{
@@ -237,7 +257,17 @@ QSplitter::handle:vertical {{
 }}
 
 /* ---- Text areas ---- */
-QTextBrowser, QTextEdit, QPlainTextEdit {{
+QTextBrowser, QTextEdit {{
+    background-color: {t.bg_surface};
+    color: {t.text_primary};
+    border: 1px solid {t.border};
+    border-radius: 6px;
+    padding: 8px;
+    font-family: {t.font_sans};
+    font-size: 14px;
+    line-height: 1.5;
+}}
+QPlainTextEdit {{
     background-color: {t.bg_surface};
     color: {t.text_primary};
     border: 1px solid {t.border};

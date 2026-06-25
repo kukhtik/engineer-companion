@@ -394,11 +394,12 @@ class CompanionWindow(QMainWindow):
         self.meta_label.setObjectName("muted")
         left_v.addWidget(self.meta_label)
 
-        self.clear_btn = QPushButton("🗑 Очистить историю")
+        self.clear_btn = QPushButton("Очистить историю")
+        self.clear_btn.setProperty("destructive", "true")
         self.clear_btn.clicked.connect(self._on_clear_history)
         left_v.addWidget(self.clear_btn)
 
-        self.prune_btn = QPushButton("✂️ Удалить старые (>200)")
+        self.prune_btn = QPushButton("Удалить старые (>200)")
         self.prune_btn.clicked.connect(self._on_prune_history)
         left_v.addWidget(self.prune_btn)
 
@@ -413,7 +414,7 @@ class CompanionWindow(QMainWindow):
 
         filter_row = QHBoxLayout()
         filter_row.setContentsMargins(0, 0, 0, 0)
-        self.bookmarks_cb = QCheckBox("★ Только избранное")
+        self.bookmarks_cb = QCheckBox("Только избранное")
         self.bookmarks_cb.toggled.connect(self._refresh_chat_log)
         filter_row.addWidget(self.bookmarks_cb)
 
@@ -443,10 +444,11 @@ class CompanionWindow(QMainWindow):
         bottom_h.setSpacing(8)
 
         self.chat_input = QLineEdit()
-        self.chat_input.setPlaceholderText("Введите вопрос по TrueBeam / VitalBeam...")
+        self.chat_input.setPlaceholderText("Введите вопрос по документации...")
         self.chat_input.returnPressed.connect(self._on_search)
 
         self.send_btn = QPushButton("Отправить")
+        self.send_btn.setProperty("primary", "true")
         self.send_btn.setShortcut("Ctrl+Return")
         self.send_btn.clicked.connect(self._on_search)
 

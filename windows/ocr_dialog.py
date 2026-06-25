@@ -21,8 +21,7 @@ sys.path.insert(0, str(_REPO))
 
 from design.tokens import DribbbleDarkQt
 
-DOCS_DIR = Path(__file__).resolve().parents[1] / "docs"
-CACHE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "ocr_cache.jsonl"
+CACHE_PATH = _REPO / "scripts" / "ocr_cache.jsonl"
 
 
 def ocr_available() -> bool:
@@ -49,21 +48,17 @@ def ocr_available() -> bool:
         return False
     return True
 
-# All 12 known PDFs
-_ALL_DOCS = [
-    "TrueBeam 3.0 Volume 1 Field Service Databook.pdf",
-    "TrueBeam 3.0 Volume 2 Field Service Databook.pdf",
-    "TrueBeam Administrators Guide.pdf",
-    "TrueBeam IEC Functional Performance Characteristics.pdf",
-    "TrueBeam IEC Site Tests.pdf",
-    "TrueBeam Machine Performance Check Reference Guide.pdf",
-    "TrueBeam Periodic Maintenance Inspection Guide.pdf",
-    "Visual Coaching Device (VCD) Instructions for Use.pdf",
-    "VitalBeam Administrators Guide.pdf",
-    "VitalBeam Instructions for Use.pdf",
-    "VitalBeam Technical Reference Guide—Volume 1.pdf",
-    "VitalBeam Technical Reference Guide—Volume 2- Imaging.pdf",
-]
+
+def _get_library_docs() -> list[str]:
+    """Return sorted list of PDF filenames currently in the library directory."""
+    try:
+        from windows.app_paths import library_dir
+        lib = library_dir()
+        if lib.is_dir():
+            return sorted(p.name for p in lib.glob("*.pdf"))
+    except Exception:
+        pass
+    return []
 
 
 class OcrWorker(QThread):
@@ -365,16 +360,20 @@ class OCRDialog(QDialog):
 
     def _refresh_stats(self) -> None:
         """Load stats from cache and update table + combobox."""
+        from windows.app_paths import library_dir
+        docs_dir = library_dir()
+
         try:
             from scripts.ocr_databooks import ocr_stats
-            stats = ocr_stats(DOCS_DIR, CACHE_PATH)
+            stats = ocr_stats(docs_dir, CACHE_PATH)
         except Exception:
             stats = []
 
-        # Merge with known docs list so all 12 always appear
+        # Merge with all PDFs currently in the library
+        lib_docs = _get_library_docs()
         stats_by_name = {s['filename']: s for s in stats}
         merged = []
-        for name in _ALL_DOCS:
+        for name in lib_docs:
             if name in stats_by_name:
                 merged.append(stats_by_name[name])
             else:
@@ -385,15 +384,14 @@ class OCRDialog(QDialog):
                     'native_pages': 0,
                     'ocr_pages': 0,
                     'percent_done': 0.0,
-                    'is_scan_heavy': 'Databook' in name,
+                    'is_scan_heavy': False,
                 })
         self._stats_cache = merged
 
         # Populate table
         self.stats_table.setRowCount(len(merged))
         for row, s in enumerate(merged):
-            prefix = "⚠ " if s['is_scan_heavy'] else ""
-            self.stats_table.setItem(row, 0, QTableWidgetItem(prefix + s['filename']))
+            self.stats_table.setItem(row, 0, QTableWidgetItem(s['filename']))
             self.stats_table.setItem(row, 1, QTableWidgetItem(str(s['total_pages'])))
             self.stats_table.setItem(row, 2, QTableWidgetItem(str(s['cached_pages'])))
             self.stats_table.setItem(row, 3, QTableWidgetItem(str(s['native_pages'])))
@@ -406,9 +404,8 @@ class OCRDialog(QDialog):
         self.doc_combo.blockSignals(True)
         self.doc_combo.clear()
         for s in merged:
-            prefix = "⚠ " if s['is_scan_heavy'] else ""
             label = (
-                f"{prefix}{s['filename']} "
+                f"{s['filename']} "
                 f"[{s['percent_done']:.0f}% кэш, {s['cached_pages']}/{s['total_pages']} стр.]"
             )
             self.doc_combo.addItem(label)
@@ -442,7 +439,8 @@ class OCRDialog(QDialog):
         if stat is None:
             return
 
-        doc_path = DOCS_DIR / stat['filename']
+        from windows.app_paths import library_dir
+        doc_path = library_dir() / stat['filename']
         if not doc_path.exists():
             QMessageBox.warning(
                 self, "Файл не найден",
@@ -530,7 +528,8 @@ class OCRDialog(QDialog):
         if stat is None:
             return
 
-        pdf_path = DOCS_DIR / stat['filename']
+        from windows.app_paths import library_dir
+        pdf_path = library_dir() / stat['filename']
         self._reindex_worker = ReindexWorker(pdf_path, CACHE_PATH)
         self._reindex_worker.finished.connect(self._on_reindex_finished)
         self._reindex_worker.error.connect(self._on_reindex_error)

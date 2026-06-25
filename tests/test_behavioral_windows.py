@@ -111,10 +111,9 @@ class TestUserSearchFlow:
     def test_chat_input_exists_and_has_placeholder(self, app, window):
         inp = window.chat_input
         assert inp.isVisible() is True
-        # Phase 1: chat_input is now the unified ask box; placeholder changed.
-        # Accept old OR new placeholder text.
+        # Unified ask box: accepts any non-empty placeholder.
         ph = inp.placeholderText()
-        assert "Уточняющий вопрос" in ph or "TrueBeam" in ph or len(ph) > 0
+        assert len(ph) > 0
 
     def test_meta_label_is_muted_style(self, app, window):
         # muted is indicated by objectName "muted"

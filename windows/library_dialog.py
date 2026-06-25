@@ -145,16 +145,17 @@ class LibraryDialog(QDialog):
         tbl_btn_row = QHBoxLayout()
         tbl_btn_row.setSpacing(8)
 
-        self.refresh_btn = QPushButton("♻ Обновить")
+        self.refresh_btn = QPushButton("Обновить")
         self.refresh_btn.clicked.connect(self._refresh_stats)
         tbl_btn_row.addWidget(self.refresh_btn)
 
-        self.remove_btn = QPushButton("🗑 Удалить из индекса")
+        self.remove_btn = QPushButton("Удалить из индекса")
+        self.remove_btn.setProperty("destructive", "true")
         self.remove_btn.setEnabled(False)
         self.remove_btn.clicked.connect(self._on_remove)
         tbl_btn_row.addWidget(self.remove_btn)
 
-        self.reindex_btn = QPushButton("♻ Переиндексировать")
+        self.reindex_btn = QPushButton("Переиндексировать")
         self.reindex_btn.setEnabled(False)
         self.reindex_btn.clicked.connect(self._on_reindex)
         tbl_btn_row.addWidget(self.reindex_btn)
@@ -171,7 +172,7 @@ class LibraryDialog(QDialog):
         add_btn_row = QHBoxLayout()
         add_btn_row.setSpacing(8)
 
-        self.add_btn = QPushButton("➕ Добавить документ…")
+        self.add_btn = QPushButton("Добавить документ…")
         self.add_btn.clicked.connect(self._on_add)
         add_btn_row.addWidget(self.add_btn)
 
@@ -451,7 +452,7 @@ class LibraryDialog(QDialog):
                 self,
                 "Файл не найден",
                 f"PDF «{source}» не найден в библиотеке:\n{pdf_file}\n\n"
-                "Сначала добавьте файл через кнопку «➕ Добавить документ…».",
+                "Сначала добавьте файл через кнопку «Добавить документ…».",
             )
             return
 
