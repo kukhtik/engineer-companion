@@ -37,3 +37,8 @@ EngineerCompanionData/
 
 # Conversation persistence (dev copy lands at repo root, not committed)
 conversations.json
+
+# Android host artifacts (large, regenerable from scripts/build_android_index.py)
+*.onnx
+android/app/src/main/assets/models/embedder_onnx/
+android/app/src/main/assets/db/chunks_index.bin
