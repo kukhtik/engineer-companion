@@ -34,3 +34,6 @@ dist*/
 build*/
 EngineerCompanion.spec
 EngineerCompanionData/
+
+# Conversation persistence (dev copy lands at repo root, not committed)
+conversations.json

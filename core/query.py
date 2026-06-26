@@ -162,18 +162,36 @@ class PromptBuilder:
         "Весь текст ответа обязательно на русском; технические термины и названия моделей можно оставлять как есть."
     )
 
-    def build(self, query: str, hits: list[SearchResult]) -> str:
+    def build(self, query: str, hits: list[SearchResult], history: list[dict] | None = None) -> str:
         context_parts: list[str] = []
         for i, h in enumerate(hits, 1):
-            # Include document name explicitly so model can copy it verbatim
             context_parts.append(
                 f"[ИСТОЧНИК {i}] Документ: «{h.source}» стр.{h.page} раздел: {h.section}\n"
                 f"{h.text}"
             )
         context = "\n\n".join(context_parts)
+
+        history_block = ""
+        if history:
+            turns = history[-3:]
+            lines = []
+            for turn in turns:
+                role = turn.get("role", "")
+                content = turn.get("content", "")
+                if role == "user":
+                    lines.append(f"Пользователь: {content[:300]}")
+                elif role == "assistant":
+                    lines.append(f"Ассистент: {content[:300]}")
+            history_text = "\n".join(lines)
+            if len(history_text) > 1000:
+                history_text = history_text[-1000:]
+            if history_text:
+                history_block = f"\nПредыдущий диалог:\n{history_text}\n"
+
         prompt = (
             f"{self.SYSTEM_PERSONA}\n\n"
-            f"КОНТЕКСТ:\n{context}\n\n"
+            f"КОНТЕКСТ:\n{context}\n"
+            f"{history_block}\n"
             f"ВОПРОС: {query}\n\nОТВЕТ НА РУССКОМ ЯЗЫКЕ:"
         )
         return prompt
@@ -187,8 +205,6 @@ class RAGQueryPipeline:
         llm_model_path: Path | None = None,
         top_k: int = 20,
         rerank_top_k: int = 5,
-        # Multilingual cross-encoder, ~120 MB, CPU-friendly (~1-2 s per 20 candidates).
-        # Set rerank_model="" to disable reranking entirely.
         rerank_model: str = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1",
         max_tokens: int = 512,
         temperature: float = 0.3,
@@ -226,9 +242,9 @@ class RAGQueryPipeline:
         )
         return self._llm
 
-    def ask(self, query: str) -> dict[str, Any]:
+    def ask(self, query: str, history: list[dict] | None = None) -> dict[str, Any]:
         hits = self.retriever.search(query)
-        prompt = self.builder.build(query, hits)
+        prompt = self.builder.build(query, hits, history=history)
         context_meta = [
             {"source": h.source, "page": h.page, "section": h.section}
             for h in hits
@@ -256,24 +272,10 @@ class RAGQueryPipeline:
         }
 
     def ask_streaming(
-        self, query: str, on_event: Callable[[dict], None]
+        self, query: str, on_event: Callable[[dict], None], history: list[dict] | None = None
     ) -> dict[str, Any]:
-        """Like ask(), but fires progress/token events via on_event throughout the pipeline.
-
-        Events fired in order:
-          {"stage": "embed"}                          — before embedding
-          {"stage": "search", "found": N}             — after lancedb search, before rerank
-          {"stage": "rerank", "from": N, "to": M}    — only if reranking actually runs
-          {"stage": "prompt", "sources": K}           — after prompt is built
-          {"stage": "generate_start"}                 — before LLM call
-          {"stage": "token", "text": chunk_text}      — for each streamed token
-          {"stage": "done", "answer": ..., "sources": ...,
-           "prompt_tokens": 0, "completion_tokens": N} — final summary
-
-        Returns the same final dict that is emitted in the "done" event.
-        """
         hits = self.retriever.search_streaming(query, on_event)
-        prompt = self.builder.build(query, hits)
+        prompt = self.builder.build(query, hits, history=history)
         context_meta = [
             {"source": h.source, "page": h.page, "section": h.section}
             for h in hits
