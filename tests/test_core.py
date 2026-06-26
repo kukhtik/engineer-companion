@@ -8,7 +8,7 @@ sys.path.insert(0, str(_REPO))
 
 import pytest
 from core.indexer import Chunker, Chunk, PdfTextExtractor, _estimate_tokens, is_low_quality_chunk
-from core.query import PromptBuilder, SearchResult, Retriever
+from core.query import PromptBuilder, SearchResult, Retriever, _is_retrieval_garbage
 
 
 class TestEstimateTokens:
@@ -266,3 +266,91 @@ class TestQualityFilter:
             "Depth of measurement: 10 cm. Output factor: 1.000 cGy/MU."
         )
         assert is_low_quality_chunk(text) is False
+
+
+class TestRetrievalGarbageFilter:
+    """Tests for _is_retrieval_garbage — the query-time quality filter."""
+
+    # --- Garbage cases (must return True) ---
+
+    def test_single_char_section_is_garbage(self):
+        # Section 'j', 'e', '0' etc. are OCR-noise headings from scanned databook pages
+        assert _is_retrieval_garbage("N HDl20 MLC HEAD ASSEMBLY SCA content here", "j") is True
+        assert _is_retrieval_garbage("some assembly diagram text here words", "e") is True
+        assert _is_retrieval_garbage("interlock sensor trips at water level text", "0") is True
+
+    def test_all_underscores_section_is_garbage(self):
+        assert _is_retrieval_garbage("B ____ l ____ }_ ____ l some more text here", "_________") is True
+        assert _is_retrieval_garbage("some text here and more text words", "____") is True
+
+    def test_tilde_in_text_is_garbage(self):
+        # ~~ and ~~~ patterns are hallmarks of scanned engineering drawings
+        assert _is_retrieval_garbage(
+            "medlcal systems !l~oi ~~m~~~~;ii APPRC\\/ED text here", "\xb7I"
+        ) is True
+
+    def test_text_starting_with_tilde_is_garbage(self):
+        # Lines starting with ~ come from scan drawing artifacts
+        assert _is_retrieval_garbage("~ HDl20 MLC HEAD ASSEMBLY", "DIMvaAricinERS(mm)") is True
+
+    def test_low_alpha_section_is_garbage(self):
+        # Section "DIMvaAricinERS(mm)" — enough alpha but parens/numbers bring it down
+        # Combined with tilde in text → garbage
+        assert _is_retrieval_garbage("~ HDl20 MLC HEAD ASSEMBLY", "DIMvaAricinERS(mm)") is True
+
+    def test_underscore_train_in_text_is_garbage(self):
+        # Four or more underscores in text indicate drawing leaders
+        assert _is_retrieval_garbage(
+            "B ____ l ____ }_ ____ section heading here", "_________"
+        ) is True
+
+    # --- Clean cases (must return False) ---
+
+    def test_clean_mlc_table_chunk_passes(self):
+        # The "MLC table" chunks (section='MLC', 3 chars) must NOT be filtered
+        # so they can reach the reranker (which correctly demotes them for 'что такое MLC?')
+        text = (
+            "The MLC table displays information about the installed MLC: the model, "
+            "operational status, number of leaves, and the MLC calibration file."
+        )
+        assert _is_retrieval_garbage(text, "MLC") is False
+
+    def test_clean_mlc_definition_passes(self):
+        text = (
+            "The MLC consists of two opposing banks of moveable tungsten leaves. "
+            "Each bank is configured with 40 leaves arranged in 40 pairs."
+        )
+        assert _is_retrieval_garbage(text, "MLC") is False
+
+    def test_clean_calibration_chunk_passes(self):
+        text = (
+            "This topic provides an overview of absolute dose calibration. "
+            "An operator must be logged in with Engineer or higher access level."
+        )
+        assert _is_retrieval_garbage(text, "Absolute Dose Calibration") is False
+
+    def test_clean_interlock_chunk_passes(self):
+        text = (
+            "An interlock prevents the system from operating until a particular "
+            "condition is resolved. The system has two types of interlocks."
+        )
+        assert _is_retrieval_garbage(text, "About Interlocks") is False
+
+    def test_clean_mpc_chunk_passes(self):
+        text = (
+            "Machine Performance Check (MPC) is an integrated self-check tool "
+            "used to verify whether or not the critical machine parameters are within tolerance."
+        )
+        assert _is_retrieval_garbage(text, "Machine Performance Check") is False
+
+    def test_short_fake_record_passes(self):
+        # Fake test records like "chunk 0" / "result one" must NOT be filtered
+        # so existing unit tests using short fake text still work.
+        assert _is_retrieval_garbage("result one", "Sec") is False
+        assert _is_retrieval_garbage("chunk 0", "Sec0") is False
+
+    def test_clean_steps_section_passes(self):
+        text = "In the Service screen, choose MLC > Communications to start the session."
+        assert _is_retrieval_garbage(text, "Steps") is False
+
+

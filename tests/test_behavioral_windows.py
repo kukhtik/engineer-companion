@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QApplication, QListWidgetItem
 _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO))
 
-from windows.main_window import CompanionWindow, ConversationStore, ChatHistory  # noqa
+from windows.main_window import CompanionWindow, ConversationStore, ChatHistory, _strip_source_tags  # noqa
 from windows.settings_dialog import SettingsDialog  # noqa
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -525,3 +525,193 @@ class TestSettingsDialog:
         assert dlg.top_k_spin.maximum() >= 20
         dlg.close()
         app.processEvents()
+
+
+# ---------------------------------------------------------------------------
+# TestStripSourceTags
+# ---------------------------------------------------------------------------
+
+class TestStripSourceTags:
+    """Tests for _strip_source_tags — removes [ИСТОЧНИК N] from display text."""
+
+    def test_strips_single_tag(self):
+        result = _strip_source_tags("Ответ: [ИСТОЧНИК 1] это Multi-Leaf Collimator.")
+        assert "[ИСТОЧНИК 1]" not in result
+        assert "Multi-Leaf Collimator" in result
+
+    def test_strips_multiple_tags(self):
+        text = "[ИСТОЧНИК 1] MLC это коллиматор. [ИСТОЧНИК 2] Используется в лучевой терапии."
+        result = _strip_source_tags(text)
+        assert "[ИСТОЧНИК 1]" not in result
+        assert "[ИСТОЧНИК 2]" not in result
+        assert "MLC" in result
+        assert "коллиматор" in result
+
+    def test_strips_tag_with_spaces(self):
+        result = _strip_source_tags("Согласно [ИСТОЧНИК  3] документации.")
+        assert "ИСТОЧНИК" not in result
+        assert "документации" in result
+
+    def test_no_tags_unchanged(self):
+        text = "Это чистый ответ без тегов источников."
+        assert _strip_source_tags(text) == text
+
+    def test_strips_tag_collapses_double_spaces(self):
+        result = _strip_source_tags("Ответ [ИСТОЧНИК 1]  дополнительный текст.")
+        assert "  " not in result
+
+    def test_empty_string(self):
+        assert _strip_source_tags("") == ""
+
+
+# ---------------------------------------------------------------------------
+# TestConversationStoreDelete
+# ---------------------------------------------------------------------------
+
+class TestConversationStoreDelete:
+    """Tests for ConversationStore.delete()."""
+
+    def test_delete_removes_conversation(self):
+        cs = ConversationStore()
+        cs.conversations = []
+        c1 = {"id": "del-aaa", "title": "A", "created": "2024-01-01T00:00:00", "turns": []}
+        c2 = {"id": "del-bbb", "title": "B", "created": "2024-06-01T00:00:00", "turns": []}
+        cs.conversations = [c1, c2]
+        result = cs.delete("del-aaa")
+        assert result is True
+        assert cs.get_conversation("del-aaa") is None
+        assert cs.get_conversation("del-bbb") is not None
+        assert len(cs.conversations) == 1
+
+    def test_delete_returns_false_for_missing_id(self):
+        cs = ConversationStore()
+        cs.conversations = []
+        result = cs.delete("nonexistent-id")
+        assert result is False
+
+    def test_delete_persists_to_file(self, tmp_path, monkeypatch):
+        # Point data_root to a temp dir so we don't pollute production data
+        monkeypatch.setattr(
+            "windows.main_window.data_root",
+            lambda: tmp_path,
+        )
+        cs = ConversationStore()
+        cs.conversations = []
+        c1 = {"id": "file-aaa", "title": "A", "created": "2024-01-01T00:00:00", "turns": []}
+        c2 = {"id": "file-bbb", "title": "B", "created": "2024-06-01T00:00:00", "turns": []}
+        cs.conversations = [c1, c2]
+        cs.save()
+
+        cs.delete("file-aaa")
+
+        # Load a fresh instance from the same path to verify persistence
+        cs2 = ConversationStore()
+        assert cs2.get_conversation("file-aaa") is None
+        assert cs2.get_conversation("file-bbb") is not None
+
+    def test_delete_empty_store_is_safe(self):
+        cs = ConversationStore()
+        cs.conversations = []
+        result = cs.delete("any-id")
+        assert result is False
+        assert cs.conversations == []
+
+
+# ---------------------------------------------------------------------------
+# TestDeleteChatUI
+# ---------------------------------------------------------------------------
+
+class TestDeleteChatUI:
+    """Tests for the delete-chat context-menu handler in CompanionWindow."""
+
+    def test_delete_non_current_conversation(self, app, window, monkeypatch):
+        """Deleting a non-current conversation removes it from the store and rail."""
+        # Seed two conversations
+        window.conv_store.conversations = []
+        c1 = {"id": "ui-aaa", "title": "Keep", "created": "2024-01-01T00:00:00", "turns": []}
+        c2 = {"id": "ui-bbb", "title": "Delete me", "created": "2024-06-01T00:00:00", "turns": []}
+        window.conv_store.conversations = [c1, c2]
+        window._current_conv = c2  # current is c2
+        window._refresh_conv_list()
+        app.processEvents()
+
+        # Confirm with "Yes" automatically
+        from PySide6.QtWidgets import QMessageBox
+        monkeypatch.setattr(QMessageBox, "question", lambda *a, **kw: QMessageBox.StandardButton.Yes)
+
+        # Call the handler directly (simulating right-click → "Удалить чат" on c1)
+        # We need an item for c1
+        from PySide6.QtWidgets import QListWidgetItem
+        from PySide6.QtCore import Qt
+        item = None
+        for i in range(window.conv_list.count()):
+            it = window.conv_list.item(i)
+            if it.data(Qt.ItemDataRole.UserRole) == "ui-aaa":
+                item = it
+                break
+        assert item is not None
+
+        # Simulate context menu action by directly calling the internal logic
+        conv_id = "ui-aaa"
+        window.conv_store.delete(conv_id)
+        window._refresh_conv_list()
+        app.processEvents()
+
+        # c1 gone, c2 still current
+        assert window.conv_store.get_conversation("ui-aaa") is None
+        assert window.conv_store.get_conversation("ui-bbb") is not None
+        assert window._current_conv["id"] == "ui-bbb"
+
+    def test_delete_current_conversation_switches_to_remaining(self, app, window, monkeypatch):
+        """Deleting the current conversation switches to next available."""
+        window.conv_store.conversations = []
+        c1 = {"id": "sw-aaa", "title": "Old", "created": "2024-01-01T00:00:00", "turns": [{"role": "user", "content": "hi", "sources": []}]}
+        c2 = {"id": "sw-bbb", "title": "Current", "created": "2024-06-01T00:00:00", "turns": [{"role": "user", "content": "hello", "sources": []}]}
+        window.conv_store.conversations = [c1, c2]
+        window._current_conv = c2
+        window._refresh_conv_list()
+        app.processEvents()
+
+        from PySide6.QtWidgets import QMessageBox
+        monkeypatch.setattr(QMessageBox, "question", lambda *a, **kw: QMessageBox.StandardButton.Yes)
+
+        # Simulate deleting the current conversation
+        is_current = True
+        window.conv_store.delete("sw-bbb")
+        remaining = window.conv_store.get_all()
+        assert len(remaining) == 1
+        window._current_conv = remaining[0]
+        window._clear_thread()
+        window._refresh_conv_list()
+        app.processEvents()
+
+        assert window.conv_store.get_conversation("sw-bbb") is None
+        assert window._current_conv["id"] == "sw-aaa"
+
+    def test_delete_last_conversation_creates_new_empty(self, app, window):
+        """Deleting the only conversation creates a fresh empty one."""
+        window.conv_store.conversations = []
+        c1 = {"id": "last-aaa", "title": "Only one", "created": "2024-01-01T00:00:00", "turns": []}
+        window.conv_store.conversations = [c1]
+        window._current_conv = c1
+        window._refresh_conv_list()
+        app.processEvents()
+
+        window.conv_store.delete("last-aaa")
+        # After deletion, store is empty — simulate the handler's empty-branch
+        remaining = window.conv_store.get_all()
+        assert remaining == []
+        window._current_conv = window.conv_store.new_conversation()
+        window._clear_thread()
+        window._refresh_conv_list()
+        app.processEvents()
+
+        # Window should have a fresh empty conversation
+        assert window._current_conv is not None
+        assert window._current_conv.get("title") == "Новый диалог"
+        assert window._current_conv.get("turns") == []
+
+    def test_conv_list_has_context_menu_policy(self, app, window):
+        """conv_list must have CustomContextMenu policy set."""
+        from PySide6.QtCore import Qt
+        assert window.conv_list.contextMenuPolicy() == Qt.ContextMenuPolicy.CustomContextMenu

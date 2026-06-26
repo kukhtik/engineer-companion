@@ -29,7 +29,7 @@ from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer
 from PySide6.QtGui import QTextOption
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
+    QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
     QPushButton, QScrollArea, QSizePolicy, QTextEdit, QVBoxLayout, QWidget,
 )
 
@@ -48,6 +48,23 @@ from windows.anim import fade_in  # noqa: E402
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+# Matches single tags like [ИСТОЧНИК 1] and compound tags like [ИСТОЧНИК 1, ИСТОЧНИК 2]
+# which Gemma sometimes emits instead of separate tags.
+_SOURCE_TAG_RE = re.compile(r"\[ИСТОЧНИК\s*\d+(?:,\s*ИСТОЧНИК\s*\d+)*\]", re.IGNORECASE)
+
+
+def _strip_source_tags(text: str) -> str:
+    """Remove inline [ИСТОЧНИК N] citation tags from answer text.
+
+    The authoritative source references are shown as cards below the bubble;
+    the inline tags are noise in the displayed answer.
+    """
+    cleaned = _SOURCE_TAG_RE.sub("", text)
+    # Collapse multiple spaces that may remain after tag removal.
+    cleaned = re.sub(r"  +", " ", cleaned)
+    return cleaned.strip()
+
 
 def _markdownish_to_html(text: str) -> str:
     """Lightweight conversion: bold, bullet lists, newlines."""
@@ -274,6 +291,15 @@ class ConversationStore:
         if conv and 0 <= turn_idx < len(conv["turns"]):
             conv["turns"][turn_idx]["starred"] = starred
             self.save()
+
+    def delete(self, conv_id: str) -> bool:
+        """Remove a conversation by id, persist atomically. Returns True if found+deleted."""
+        before = len(self.conversations)
+        self.conversations = [c for c in self.conversations if c["id"] != conv_id]
+        if len(self.conversations) < before:
+            self.save()
+            return True
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -744,6 +770,8 @@ class CompanionWindow(QMainWindow):
 
         self.conv_list = QListWidget()
         self.conv_list.itemClicked.connect(self._on_conv_item_clicked)
+        self.conv_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.conv_list.customContextMenuRequested.connect(self._on_conv_context_menu)
         rail_v.addWidget(self.conv_list, stretch=1)
 
         self.favorites_btn = QPushButton("★ Избранное")
@@ -1142,8 +1170,9 @@ QLabel#assistantBubble {{
             if self._current_bubble_label is not None:
                 # _current_bubble_label is now a QTextEdit
                 te = self._current_bubble_label
-                te.setPlainText(self._streaming_answer + "▌")
-            self.chat_log.setHtml(html.escape(self._streaming_answer) + "▌")
+                display_streaming = _strip_source_tags(self._streaming_answer)
+                te.setPlainText(display_streaming + "▌")
+            self.chat_log.setHtml(html.escape(_strip_source_tags(self._streaming_answer)) + "▌")
             if panel:
                 panel.on_token()
         elif stage == "error":
@@ -1161,11 +1190,12 @@ QLabel#assistantBubble {{
         if self._activity_panel is not None:
             self._activity_panel.on_done()
 
-        # Finalize bubble text (remove caret)
+        # Finalize bubble text (remove caret, strip [ИСТОЧНИК N] tags)
+        display_answer = _strip_source_tags(answer)
         if self._current_bubble_label is not None:
             te = self._current_bubble_label
-            te.setPlainText(answer)
-            display_html = _markdownish_to_html(answer)
+            te.setPlainText(display_answer)
+            display_html = _markdownish_to_html(display_answer)
             self.chat_log.setHtml(display_html)
 
         # Add source cards with staggered reveal.
@@ -1314,6 +1344,48 @@ QLabel#assistantBubble {{
         conv_id = item.data(Qt.ItemDataRole.UserRole)
         if conv_id and (self._current_conv is None or conv_id != self._current_conv["id"]):
             self._load_conversation(conv_id)
+
+    def _on_conv_context_menu(self, pos) -> None:
+        """Right-click context menu on the conversation list — offers 'Удалить чат'."""
+        item = self.conv_list.itemAt(pos)
+        if item is None:
+            return
+        conv_id = item.data(Qt.ItemDataRole.UserRole)
+        if not conv_id:
+            return
+
+        menu = QMenu(self)
+        delete_action = menu.addAction("Удалить чат")
+        action = menu.exec(self.conv_list.mapToGlobal(pos))
+        if action != delete_action:
+            return
+
+        # Confirm before deleting
+        reply = QMessageBox.question(
+            self,
+            "Удалить диалог",
+            "Удалить этот диалог? Отменить действие невозможно.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        is_current = (self._current_conv is not None and self._current_conv["id"] == conv_id)
+        self.conv_store.delete(conv_id)
+
+        if is_current:
+            # Switch to the most recent remaining conversation, or start fresh
+            remaining = self.conv_store.get_all()
+            if remaining:
+                self._current_conv = remaining[0]
+                self._clear_thread()
+                self._load_conversation(remaining[0]["id"])
+            else:
+                self._current_conv = self.conv_store.new_conversation()
+                self._clear_thread()
+
+        self._refresh_conv_list()
 
     def _on_favorites_clicked(self) -> None:
         self._favorites_mode = not self._favorites_mode
