@@ -18,33 +18,19 @@ import androidx.compose.ui.unit.sp
 import com.varian.engcomp.ui.AnswerPanel
 import com.varian.engcomp.ui.SourcesList
 import com.varian.engcomp.ui.theme.DribbbleDark
+import com.varian.engcomp.ui.theme.EngineerCompanionTheme
 import com.varian.engcomp.viewmodel.SearchViewModel
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            EngineerCompanionTheme {
+            // TODO(persist): wire darkTheme to a ThemeViewModel / DataStore toggle
+            EngineerCompanionTheme(darkTheme = true) {
                 SearchScreen()
             }
         }
     }
-}
-
-@Composable
-fun EngineerCompanionTheme(content: @Composable () -> Unit) {
-    MaterialTheme(
-        colorScheme = darkColorScheme(
-            background = DribbbleDark.bgBase,
-            surface = DribbbleDark.bgSurface,
-            primary = DribbbleDark.accentCyan,
-            secondary = DribbbleDark.accentGreen,
-            onBackground = DribbbleDark.textPrimary,
-            onSurface = DribbbleDark.textPrimary,
-            error = DribbbleDark.accentRed,
-        ),
-        content = content
-    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
