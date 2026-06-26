@@ -9,12 +9,16 @@ Phase 5 changes:
 - ConversationStore: multi-conversation JSON persistence
 - QueryWorker: passes history to pipeline for multi-turn context
 - Compat shims: chat_log, results_list, meta_label for backward-compat tests
+Phase C changes:
+- _ActivityPanel: rich activity strip driven by pipeline events
+- QTextEdit assistant bubble for proper text wrapping and height
 """
 
 import html
 import json
 import re
 import sys
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -22,10 +26,11 @@ from typing import Any
 from urllib.parse import quote
 
 from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer
+from PySide6.QtGui import QTextOption
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
     QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
-    QPushButton, QScrollArea, QVBoxLayout, QWidget,
+    QPushButton, QScrollArea, QSizePolicy, QTextEdit, QVBoxLayout, QWidget,
 )
 
 # Allow running from repo root without install
@@ -289,6 +294,290 @@ class QueryWorker(QThread):
 
 
 # ---------------------------------------------------------------------------
+# _ActivityPanel
+# ---------------------------------------------------------------------------
+
+class _ActivityPanel(QWidget):
+    """Rich activity strip shown while a RAG query is in-flight.
+
+    Driven by pipeline events — every displayed number comes from a real event field.
+    """
+
+    STAGES = [
+        ("embed",          "Векторизация запроса"),
+        ("search",         "Поиск · найдено {found} фрагментов"),
+        ("rerank",         "Реранжирование {from_n}→{to_n}"),
+        ("prompt",         "Сборка контекста · {sources_k} источников"),
+        ("generate_start", "Генерация ответа"),
+    ]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._stage_states: dict = {}  # stage_key -> "pending"|"active"|"done"
+        self._found_count: int = 0
+        self._rerank_from: int = 0
+        self._rerank_to: int = 0
+        self._sources_k: int = 0
+        self._token_count: int = 0
+        self._gen_start_time: float = 0.0
+        self._has_rerank: bool = False
+        self._anim_refs: list = []
+        self._gen_timer: QTimer | None = None
+
+        self._build_ui()
+        self.hide()
+
+    def _build_ui(self):
+        root_v = QVBoxLayout(self)
+        root_v.setContentsMargins(8, 6, 8, 6)
+        root_v.setSpacing(4)
+
+        # Stage strip frame
+        self._strip_frame = QFrame()
+        self._strip_frame.setObjectName("activityStrip")
+        self._strip_frame.setFrameStyle(QFrame.Shape.StyledPanel)
+        strip_v = QVBoxLayout(self._strip_frame)
+        strip_v.setContentsMargins(8, 6, 8, 6)
+        strip_v.setSpacing(3)
+
+        self._stage_rows: dict = {}
+
+        for key, label_tpl in self.STAGES:
+            row_w = QWidget()
+            row_h = QHBoxLayout(row_w)
+            row_h.setContentsMargins(0, 0, 0, 0)
+            row_h.setSpacing(6)
+
+            icon_lbl = QLabel("○")
+            icon_lbl.setFixedWidth(14)
+            icon_lbl.setObjectName("stageIcon")
+
+            text_lbl = QLabel(label_tpl.replace("{found}", "0")
+                                        .replace("{from_n}", "0")
+                                        .replace("{to_n}", "0")
+                                        .replace("{sources_k}", "0"))
+            text_lbl.setObjectName("stageLbl")
+
+            # Rerank gets an extra mini-viz container
+            rerank_viz = None
+            if key == "rerank":
+                rerank_viz = QWidget()
+                QHBoxLayout(rerank_viz).setContentsMargins(0, 0, 0, 0)
+
+            row_h.addWidget(icon_lbl)
+            row_h.addWidget(text_lbl)
+            if rerank_viz:
+                row_h.addWidget(rerank_viz)
+            row_h.addStretch()
+
+            strip_v.addWidget(row_w)
+            self._stage_rows[key] = (icon_lbl, text_lbl, row_w, rerank_viz)
+
+        root_v.addWidget(self._strip_frame)
+
+        # Metrics row (visible only after generate_start)
+        self._metrics_row = QWidget()
+        met_h = QHBoxLayout(self._metrics_row)
+        met_h.setContentsMargins(0, 0, 0, 0)
+        met_h.setSpacing(12)
+
+        self._elapsed_label = QLabel("0s")
+        self._elapsed_label.setObjectName("muted")
+        self._tokens_label = QLabel("0 токенов")
+        self._tokens_label.setObjectName("muted")
+        self._tps_label = QLabel("0 т/с")
+        self._tps_label.setObjectName("muted")
+
+        met_h.addWidget(self._elapsed_label)
+        met_h.addWidget(self._tokens_label)
+        met_h.addWidget(self._tps_label)
+        met_h.addStretch()
+        self._metrics_row.hide()
+        root_v.addWidget(self._metrics_row)
+
+        # Summary label (shown on done, replaces strip)
+        self._summary_label = QLabel("")
+        self._summary_label.setObjectName("muted")
+        self._summary_label.setWordWrap(True)
+        self._summary_label.hide()
+        root_v.addWidget(self._summary_label)
+
+    def reset(self):
+        """Call before starting a new query."""
+        self._found_count = 0
+        self._rerank_from = 0
+        self._rerank_to = 0
+        self._sources_k = 0
+        self._token_count = 0
+        self._gen_start_time = 0.0
+        self._has_rerank = False
+        self._stage_states = {key: "pending" for key, _ in self.STAGES}
+
+        self._strip_frame.show()
+        self._metrics_row.hide()
+        self._summary_label.hide()
+
+        for key, _ in self.STAGES:
+            icon_lbl, text_lbl, row_w, _ = self._stage_rows[key]
+            icon_lbl.setText("○")
+            # Reset rerank row text
+            if key == "rerank":
+                text_lbl.setText("Реранжирование 0→0")
+                row_w.hide()
+            elif key == "search":
+                text_lbl.setText("Поиск · найдено 0 фрагментов")
+                row_w.show()
+            elif key == "prompt":
+                text_lbl.setText("Сборка контекста · 0 источников")
+                row_w.show()
+            else:
+                row_w.show()
+
+        self._set_stage_style("embed", "active")
+
+        if self._gen_timer:
+            self._gen_timer.stop()
+            self._gen_timer = None
+
+        self.show()
+
+    def _set_stage_style(self, stage_key: str, state: str):
+        """Apply pending/active/done styling to a stage row."""
+        if stage_key not in self._stage_rows:
+            return
+        icon_lbl, text_lbl, row_w, _ = self._stage_rows[stage_key]
+        self._stage_states[stage_key] = state
+
+        if state == "pending":
+            icon_lbl.setText("○")
+            icon_lbl.setStyleSheet("color: #666;")
+            text_lbl.setStyleSheet("color: #666;")
+        elif state == "active":
+            icon_lbl.setText("●")
+            icon_lbl.setStyleSheet("color: #F5C518; font-weight: bold;")
+            text_lbl.setStyleSheet("color: #F5C518; font-weight: bold;")
+        elif state == "done":
+            icon_lbl.setText("✓")
+            icon_lbl.setStyleSheet("color: #4CAF50;")
+            text_lbl.setStyleSheet("color: #4CAF50;")
+        elif state == "error":
+            icon_lbl.setText("✗")
+            icon_lbl.setStyleSheet("color: #f44336;")
+            text_lbl.setStyleSheet("color: #f44336;")
+
+    def on_embed(self):
+        self._set_stage_style("embed", "active")
+
+    def on_search(self, found: int):
+        self._found_count = found
+        self._set_stage_style("embed", "done")
+        self._set_stage_style("search", "active")
+        icon_lbl, text_lbl, row_w, _ = self._stage_rows["search"]
+        text_lbl.setText(f"Поиск · найдено {found} фрагментов")
+
+    def on_rerank(self, from_n: int, to_n: int):
+        self._rerank_from = from_n
+        self._rerank_to = to_n
+        self._has_rerank = True
+        self._set_stage_style("search", "done")
+
+        icon_lbl, text_lbl, row_w, rerank_viz = self._stage_rows["rerank"]
+        text_lbl.setText(f"Реранжирование {from_n}→{to_n} фрагментов")
+        row_w.show()
+        self._set_stage_style("rerank", "active")
+
+        # Build mini-viz: from_n small colored squares, first to_n are accent
+        if rerank_viz is not None:
+            lay = rerank_viz.layout()
+            # Clear existing squares
+            while lay.count():
+                item = lay.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+            # Cap at 20 squares max for visual clarity
+            show_n = min(from_n, 20)
+            ratio = to_n / from_n if from_n > 0 else 0
+            keep_n = round(show_n * ratio)
+            for i in range(show_n):
+                sq = QFrame()
+                sq.setFixedSize(10, 10)
+                sq.setFrameStyle(QFrame.Shape.Box)
+                if i < keep_n:
+                    sq.setStyleSheet("background: #F5C518; border: none; border-radius: 2px;")
+                else:
+                    sq.setStyleSheet("background: #444; border: none; border-radius: 2px;")
+                lay.addWidget(sq)
+
+        self._set_stage_style("rerank", "done")
+
+    def on_prompt(self, sources: int):
+        self._sources_k = sources
+        if not self._has_rerank:
+            self._set_stage_style("search", "done")
+        else:
+            self._set_stage_style("rerank", "done")
+        self._set_stage_style("prompt", "active")
+        icon_lbl, text_lbl, row_w, _ = self._stage_rows["prompt"]
+        text_lbl.setText(f"Сборка контекста · {sources} источников")
+
+    def on_generate_start(self):
+        self._set_stage_style("prompt", "done")
+        self._set_stage_style("generate_start", "active")
+        self._gen_start_time = time.monotonic()
+        self._token_count = 0
+        self._metrics_row.show()
+        self._gen_timer = QTimer(self)
+        self._gen_timer.setInterval(500)
+        self._gen_timer.timeout.connect(self._tick_metrics)
+        self._gen_timer.start()
+
+    def on_token(self):
+        self._token_count += 1
+
+    def _tick_metrics(self):
+        elapsed = time.monotonic() - self._gen_start_time
+        tps = self._token_count / elapsed if elapsed > 0 else 0.0
+        self._elapsed_label.setText(f"{elapsed:.0f}s")
+        self._tokens_label.setText(f"{self._token_count} токенов")
+        self._tps_label.setText(f"{tps:.1f} т/с")
+
+    def on_done(self) -> str:
+        """Collapse strip to summary line, return summary text."""
+        if self._gen_timer:
+            self._gen_timer.stop()
+            self._gen_timer = None
+
+        elapsed = time.monotonic() - self._gen_start_time if self._gen_start_time > 0 else 0.0
+        self._set_stage_style("generate_start", "done")
+
+        # Build summary
+        parts = [f"✓ найдено {self._found_count}"]
+        if self._has_rerank:
+            parts.append(f"реранж {self._rerank_from}→{self._rerank_to}")
+        parts.append(f"{self._sources_k} источников")
+        parts.append(f"{self._token_count} токенов за {elapsed:.0f}s")
+        summary = " · ".join(parts)
+
+        self._strip_frame.hide()
+        self._metrics_row.hide()
+        self._summary_label.setText(summary)
+        self._summary_label.show()
+        return summary
+
+    def on_error(self, msg: str):
+        if self._gen_timer:
+            self._gen_timer.stop()
+            self._gen_timer = None
+        # Mark current active stage as error
+        for key, _ in self.STAGES:
+            if self._stage_states.get(key) == "active":
+                self._set_stage_style(key, "error")
+                icon_lbl, text_lbl, row_w, _ = self._stage_rows[key]
+                text_lbl.setText(f"Ошибка: {msg[:60]}")
+                break
+
+
+# ---------------------------------------------------------------------------
 # CompanionWindow
 # ---------------------------------------------------------------------------
 
@@ -303,12 +592,14 @@ class CompanionWindow(QMainWindow):
         self._current_query: str = ""
         self._favorites_mode: bool = False
         self._current_conv: dict | None = None
-        self._current_bubble_label: QLabel | None = None
+        self._current_bubble_label: QTextEdit | None = None
         self._current_bubble_container: QWidget | None = None
         self._current_bubble_sources_layout = None
         self._current_star_btn: QPushButton | None = None
         self._current_copy_btn: QPushButton | None = None
         self._current_turn_idx: int = 0
+        self._activity_panel: _ActivityPanel | None = None
+        self._anim_refs: list = []
 
         # Compat shims
         self.chat_log = _StreamingChatLogCompat()
@@ -454,7 +745,7 @@ class CompanionWindow(QMainWindow):
         self.thread_scroll.setWidget(self.thread_container)
         center_v.addWidget(self.thread_scroll, stretch=1)
 
-        # Status row
+        # Status row (kept for backward-compat with tests)
         self.status_row = QWidget()
         self.status_row.hide()
         status_h = QHBoxLayout(self.status_row)
@@ -473,6 +764,10 @@ class CompanionWindow(QMainWindow):
         status_h.addWidget(self._status_dot)
         status_h.addWidget(self._status_label, stretch=1)
         center_v.addWidget(self.status_row)
+
+        # Activity panel (Phase C)
+        self._activity_panel = _ActivityPanel()
+        center_v.addWidget(self._activity_panel)
 
         # Composer
         composer = QWidget()
@@ -554,6 +849,14 @@ QPushButton#sourceCard:hover {{
     border-color: {t.accent_primary};
     color: {t.text_primary};
 }}
+QTextEdit#assistantBubble {{
+    background-color: {t.bg_surface};
+    border: 1px solid {t.border};
+    border-radius: 12px;
+    padding: 10px 14px;
+    font-size: 14px;
+    line-height: 1.5;
+}}
 QLabel#assistantBubble {{
     background-color: {t.bg_surface};
     border: 1px solid {t.border};
@@ -610,19 +913,29 @@ QLabel#assistantBubble {{
         return outer
 
     def _make_assistant_bubble(self):
-        """Returns (container, text_label, sources_layout, star_btn, copy_btn)."""
+        """Returns (container, text_edit, sources_layout, star_btn, copy_btn)."""
         container = QWidget()
         v = QVBoxLayout(container)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(6)
 
-        text_label = QLabel()
-        text_label.setObjectName("assistantBubble")
-        text_label.setTextFormat(Qt.TextFormat.RichText)
-        text_label.setWordWrap(True)
-        text_label.setOpenExternalLinks(False)
-        text_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        v.addWidget(text_label)
+        text_edit = QTextEdit()
+        text_edit.setObjectName("assistantBubble")
+        text_edit.setReadOnly(True)
+        text_edit.setFrameStyle(QFrame.Shape.NoFrame)
+        text_edit.setWordWrapMode(QTextOption.WrapMode.WordWrap)
+        text_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        text_edit.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        text_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        text_edit.setMinimumHeight(40)
+        text_edit.setMaximumWidth(560)
+        # Resize to content
+        text_edit.document().contentsChanged.connect(
+            lambda te=text_edit: te.setFixedHeight(
+                min(400, max(40, int(te.document().size().height()) + 16))
+            )
+        )
+        v.addWidget(text_edit)
 
         sources_layout = QVBoxLayout()
         sources_layout.setSpacing(4)
@@ -644,7 +957,7 @@ QLabel#assistantBubble {{
         action_row.addStretch()
         v.addLayout(action_row)
 
-        return container, text_label, sources_layout, star_btn, copy_btn
+        return container, text_edit, sources_layout, star_btn, copy_btn
 
     def _make_source_card(self, src: dict) -> QPushButton:
         filename = src.get("source", "")
@@ -701,11 +1014,12 @@ QLabel#assistantBubble {{
             self._add_bubble_to_thread(user_bub)
             # Add error bubble
             container, lbl, slayout, star_btn, copy_btn = self._make_assistant_bubble()
-            lbl.setText('<span style="color: red;">[Ошибка: LLM pipeline не инициализирован]</span>')
+            lbl.setHtml('<span style="color: red;">[Ошибка: LLM pipeline не инициализирован]</span>')
             self._add_bubble_to_thread(container)
             # Update chat_log compat
             self.chat_log.setHtml('[Ошибка: LLM pipeline не инициализирован]')
             self.send_btn.setEnabled(True)
+            self.chat_input.setEnabled(True)
             return
 
         # Build history from current conversation (last 6 turns = 3 Q&A pairs)
@@ -724,7 +1038,7 @@ QLabel#assistantBubble {{
 
         # Create placeholder assistant bubble
         container, lbl, slayout, star_btn, copy_btn = self._make_assistant_bubble()
-        lbl.setText('<span style="color: #888;">...</span>')
+        lbl.setHtml('<span style="color: #888;">...</span>')
         self._add_bubble_to_thread(container)
         self._current_bubble_label = lbl
         self._current_bubble_container = container
@@ -733,6 +1047,11 @@ QLabel#assistantBubble {{
         self._current_copy_btn = copy_btn
         self._current_turn_idx = len(self._current_conv["turns"]) if self._current_conv else 0
 
+        # Reset and show activity panel
+        if self._activity_panel is not None:
+            self._activity_panel.reset()
+
+        self.chat_input.setEnabled(False)
         self._start_status_indicator("Инициализация…")
         self._start_meta_pulse()
         self._streaming_answer = ""
@@ -747,32 +1066,48 @@ QLabel#assistantBubble {{
 
     def _on_pipeline_event(self, event: dict) -> None:
         stage = event.get("stage", "")
+        panel = self._activity_panel
+
         if stage == "embed":
             self._set_status("Поиск по документации…")
+            if panel:
+                panel.on_embed()
         elif stage == "search":
             found = event.get("found", 0)
             self._set_status(f"Найдено фрагментов: {found}")
+            if panel:
+                panel.on_search(found)
         elif stage == "rerank":
             n = event.get("from", 0)
             m = event.get("to", 0)
             self._set_status(f"Реранжирование: {n} → {m}")
+            if panel:
+                panel.on_rerank(n, m)
         elif stage == "prompt":
             k = event.get("sources", 0)
             self._set_status(f"Контекст: {k} источников")
+            if panel:
+                panel.on_prompt(k)
         elif stage == "generate_start":
             self._set_status("Генерация ответа…")
             self._streaming_answer = ""
             self.chat_log.setHtml("")
+            if panel:
+                panel.on_generate_start()
         elif stage == "token":
             chunk = event.get("text", "")
             self._streaming_answer += chunk
-            escaped = html.escape(self._streaming_answer)
-            display_html = escaped.replace("\n", "<br>") + '<span style="color:#888;">▌</span>'
             if self._current_bubble_label is not None:
-                self._current_bubble_label.setText(display_html)
-            self.chat_log.setHtml(display_html)
+                # _current_bubble_label is now a QTextEdit
+                te = self._current_bubble_label
+                te.setPlainText(self._streaming_answer + "▌")
+            self.chat_log.setHtml(html.escape(self._streaming_answer) + "▌")
+            if panel:
+                panel.on_token()
         elif stage == "error":
             self._set_status(f"Ошибка: {event.get('message', '')}")
+            if panel:
+                panel.on_error(event.get("message", ""))
 
     def _on_result(self, result: dict[str, Any]) -> None:
         self._stop_status_indicator()
@@ -780,17 +1115,25 @@ QLabel#assistantBubble {{
         answer = result.get("answer", "")
         sources = result.get("sources", [])
 
-        # Finalize bubble text
+        # Collapse activity panel to summary
+        if self._activity_panel is not None:
+            self._activity_panel.on_done()
+
+        # Finalize bubble text (remove caret)
         if self._current_bubble_label is not None:
+            te = self._current_bubble_label
+            te.setPlainText(answer)
             display_html = _markdownish_to_html(answer)
-            self._current_bubble_label.setText(display_html)
             self.chat_log.setHtml(display_html)
 
-        # Add source cards
+        # Add source cards with staggered fade-in
         if self._current_bubble_sources_layout is not None:
-            for src in sources:
+            for i, src in enumerate(sources):
                 card = self._make_source_card(src)
                 self._current_bubble_sources_layout.addWidget(card)
+                card.hide()
+                delay = i * 80
+                QTimer.singleShot(delay, lambda c=card: fade_in(c, duration=200))
 
         # Update results_list compat
         self.results_list.clear()
@@ -840,18 +1183,23 @@ QLabel#assistantBubble {{
         if self._current_bubble_container is not None:
             fade_in(self._current_bubble_container)
         self._scroll_to_bottom()
+        self.chat_input.setEnabled(True)
 
     def _on_error(self, msg: str) -> None:
         self._stop_status_indicator()
         self._stop_meta_pulse()
         err_html = f'<span style="color: red;">[Ошибка: {html.escape(msg)}]</span>'
         if self._current_bubble_label is not None:
-            self._current_bubble_label.setText(err_html)
+            self._current_bubble_label.setHtml(err_html)
         self.chat_log.setHtml(err_html)
+        if self._activity_panel is not None:
+            self._activity_panel.on_error(msg)
         self.send_btn.setEnabled(True)
+        self.chat_input.setEnabled(True)
 
     def _cleanup_worker(self) -> None:
         self.send_btn.setEnabled(True)
+        self.chat_input.setEnabled(True)
         self.worker = None
 
     # ------------------------------------------------------------------
@@ -879,7 +1227,7 @@ QLabel#assistantBubble {{
                 self.thread_layout.addWidget(bub)
             elif role == "assistant":
                 container, lbl, slayout, star_btn, copy_btn = self._make_assistant_bubble()
-                lbl.setText(_markdownish_to_html(content))
+                lbl.setHtml(_markdownish_to_html(content))
                 for src in sources:
                     card = self._make_source_card(src)
                     slayout.addWidget(card)
@@ -928,7 +1276,7 @@ QLabel#assistantBubble {{
                         self.thread_layout.addWidget(heading)
                         shown_heading = True
                     container, lbl, slayout, star_btn, copy_btn = self._make_assistant_bubble()
-                    lbl.setText(_markdownish_to_html(turn.get("content", "")))
+                    lbl.setHtml(_markdownish_to_html(turn.get("content", "")))
                     for src in turn.get("sources", []):
                         card = self._make_source_card(src)
                         slayout.addWidget(card)

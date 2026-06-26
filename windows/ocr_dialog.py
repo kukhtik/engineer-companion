@@ -284,6 +284,14 @@ class OCRDialog(QDialog):
         self.stats_label = QLabel("Нативных: — | OCR: — | Прошло: — | ETA: —")
         prog_v.addWidget(self.stats_label)
 
+        # Streaming page log — last ~3 processed pages
+        self._page_log_widget = QWidget()
+        self._page_log_layout = QVBoxLayout(self._page_log_widget)
+        self._page_log_layout.setContentsMargins(0, 4, 0, 0)
+        self._page_log_layout.setSpacing(2)
+        self._page_log_lines: list = []
+        prog_v.addWidget(self._page_log_widget)
+
         self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
         prog_v.addWidget(self.status_label)
@@ -486,7 +494,32 @@ class OCRDialog(QDialog):
 
         self.progress_bar.setMaximum(max(total, 1))
         self.progress_bar.setValue(done)
-        self.page_label.setText(f"Страница {done} / {total}")
+        self.page_label.setText(f"стр. {done} / {total}")
+
+        # Add page log line
+        page_idx = event.get('page_index', 0)
+        source = event.get('source', 'unknown')
+        if source == 'native':
+            type_label = 'нативный текст'
+        elif source == 'ocr':
+            type_label = 'OCR'
+        else:
+            type_label = 'неизвестно'
+
+        line_lbl = QLabel(f"стр. {page_idx + 1}: {type_label}")
+        line_lbl.setObjectName("muted")
+        self._page_log_layout.addWidget(line_lbl)
+        self._page_log_lines.append(line_lbl)
+
+        # Cap at 3 lines
+        while len(self._page_log_lines) > 3:
+            oldest = self._page_log_lines.pop(0)
+            self._page_log_layout.removeWidget(oldest)
+            oldest.deleteLater()
+
+        # Fade in the new line
+        from windows.anim import fade_in
+        fade_in(line_lbl, duration=150)
 
         if done > 0 and elapsed > 0:
             eta = elapsed / done * (total - done)
