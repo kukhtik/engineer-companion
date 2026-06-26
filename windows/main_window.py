@@ -42,7 +42,7 @@ from design.tokens import DribbbleDarkQt  # noqa: E402  (backward-compat import 
 from windows.app_paths import db_path as _default_db_path, ensure_seeded, data_root  # noqa: E402
 from windows.settings_dialog import SettingsDialog, load_settings  # noqa: E402
 from windows.theme import ThemeManager  # noqa: E402
-from windows.anim import fade_in, fade_out  # noqa: E402
+from windows.anim import fade_in  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -235,8 +235,30 @@ class ConversationStore:
             "turns": [],
         }
         self.conversations.insert(0, conv)
-        self.save()
+        # Do NOT save yet — only persist once the conversation has actual turns.
         return conv
+
+    def get_or_create_empty(self) -> dict:
+        """Return the most-recent empty conversation, creating one if needed.
+
+        An 'empty' conversation has no turns and still has the default title.
+        This prevents "Новый диалог" spam in the left rail.
+        """
+        convs = self.get_all()
+        for c in convs:
+            if not c.get("turns") and c.get("title") == "Новый диалог":
+                return c
+        return self.new_conversation()
+
+    def prune_empty(self) -> None:
+        """Remove all empty/untitled conversations except the most recent one."""
+        empties = [c for c in self.conversations
+                   if not c.get("turns") and c.get("title") == "Новый диалог"]
+        # Keep the newest empty (index 0 after get_all sort), delete the rest
+        for c in empties[1:]:
+            self.conversations.remove(c)
+        if empties[1:]:
+            self.save()
 
     def get_all(self) -> list[dict]:
         return sorted(self.conversations, key=lambda c: c.get("created", ""), reverse=True)
@@ -542,7 +564,7 @@ class _ActivityPanel(QWidget):
         self._tps_label.setText(f"{tps:.1f} т/с")
 
     def on_done(self) -> str:
-        """Collapse strip to summary line, return summary text."""
+        """Collapse strip to summary line briefly, then hide the panel."""
         if self._gen_timer:
             self._gen_timer.stop()
             self._gen_timer = None
@@ -562,7 +584,15 @@ class _ActivityPanel(QWidget):
         self._metrics_row.hide()
         self._summary_label.setText(summary)
         self._summary_label.show()
+
+        # Hide the entire panel after a short display so it's invisible at idle
+        QTimer.singleShot(2500, self._hide_after_done)
         return summary
+
+    def _hide_after_done(self) -> None:
+        """Hide the panel and clear the summary — returns to idle state."""
+        self._summary_label.hide()
+        self.hide()
 
     def on_error(self, msg: str):
         if self._gen_timer:
@@ -575,6 +605,8 @@ class _ActivityPanel(QWidget):
                 icon_lbl, text_lbl, row_w, _ = self._stage_rows[key]
                 text_lbl.setText(f"Ошибка: {msg[:60]}")
                 break
+        # Hide panel after a short display
+        QTimer.singleShot(3000, self.hide)
 
 
 # ---------------------------------------------------------------------------
@@ -623,12 +655,24 @@ class CompanionWindow(QMainWindow):
         self._apply_startup_appearance()
         self._refresh_index_status()
 
-        # Load most recent conversation or start new
+        # Prune stale empty/untitled conversations accumulated from previous runs
+        self.conv_store.prune_empty()
+
+        # Load most recent conversation or start new.
+        # If the most recent conversation is empty/untitled, just switch to it
+        # (don't create another blank one on top of it).
         convs = self.conv_store.get_all()
-        if convs:
+        if convs and convs[0].get("turns"):
+            # Most recent has turns — load it normally
             self._load_conversation(convs[0]["id"])
+        elif convs:
+            # Most recent is empty — reuse it as current without persisting again
+            self._current_conv = convs[0]
+            self._clear_thread()
         else:
-            self._start_new_conversation()
+            # No conversations at all — create the first one
+            self._current_conv = self.conv_store.new_conversation()
+            self._clear_thread()
         self._refresh_conv_list()
 
     # ------------------------------------------------------------------
@@ -871,15 +915,13 @@ QLabel#assistantBubble {{
             app.setStyleSheet(current + extra_qss)
 
     def _on_set_theme(self, name: str) -> None:
+        """Switch theme instantly — no opacity-effect crossfade on the central
+        widget (that grabs the whole widget tree as a pixmap while children
+        are painting, causing QPainter "Painter not active" floods)."""
         app = QApplication.instance()
-        central = self.centralWidget()
-        if central is not None and central.isVisible():
-            def _do_switch() -> None:
-                self._theme_manager.set_theme(name, app)
-                fade_in(central, duration=200)
-            fade_out(central, duration=120, on_done=_do_switch)
-        else:
-            self._theme_manager.set_theme(name, app)
+        self._theme_manager.set_theme(name, app)
+        # Reapply per-window extra QSS so rail/composer/bubble colours update
+        self._apply_tokens()
 
     def _apply_startup_appearance(self) -> None:
         from windows.settings_dialog import apply_font_scale, apply_density
@@ -1126,14 +1168,17 @@ QLabel#assistantBubble {{
             display_html = _markdownish_to_html(answer)
             self.chat_log.setHtml(display_html)
 
-        # Add source cards with staggered fade-in
+        # Add source cards with staggered reveal.
+        # We use a simple show() after a delay instead of QGraphicsOpacityEffect
+        # fade-in, which avoids stacking multiple effects inside the scroll area
+        # and triggering QPainter "Painter not active" errors.
         if self._current_bubble_sources_layout is not None:
             for i, src in enumerate(sources):
                 card = self._make_source_card(src)
                 self._current_bubble_sources_layout.addWidget(card)
                 card.hide()
                 delay = i * 80
-                QTimer.singleShot(delay, lambda c=card: fade_in(c, duration=200))
+                QTimer.singleShot(delay, lambda c=card: c.show())
 
         # Update results_list compat
         self.results_list.clear()
@@ -1181,7 +1226,12 @@ QLabel#assistantBubble {{
         self.history.add(self._current_query, answer, source_meta)
 
         if self._current_bubble_container is not None:
-            fade_in(self._current_bubble_container)
+            # Defer the fade-in by one event-loop tick so the widget is fully
+            # laid out before the painter is activated — prevents QPainter
+            # "Painter not active" when the bubble is added while the scroll
+            # area is mid-repaint.
+            c = self._current_bubble_container
+            QTimer.singleShot(0, lambda: fade_in(c, duration=180))
         self._scroll_to_bottom()
         self.chat_input.setEnabled(True)
 
@@ -1207,7 +1257,16 @@ QLabel#assistantBubble {{
     # ------------------------------------------------------------------
 
     def _start_new_conversation(self) -> None:
-        self._current_conv = self.conv_store.new_conversation()
+        # Reuse the current conversation if it's already empty — don't create
+        # a new one just because the user clicked "Новый чат" again.
+        if (self._current_conv is not None
+                and not self._current_conv.get("turns")
+                and self._current_conv.get("title") == "Новый диалог"):
+            self._clear_thread()
+            self._favorites_mode = False
+            self._refresh_conv_list()
+            return
+        self._current_conv = self.conv_store.get_or_create_empty()
         self._clear_thread()
         self._favorites_mode = False
         self._refresh_conv_list()
@@ -1309,27 +1368,31 @@ QLabel#assistantBubble {{
         self._status_label.show()
         self._status_dot.show()
         self._dot_pulse_going = True
+        # Use a QTimer-driven stylesheet pulse — no QGraphicsOpacityEffect,
+        # so no QPainter conflicts with sibling widgets.
+        self._dot_pulse_bright = True
+        self._dot_pulse_timer = QTimer(self)
+        self._dot_pulse_timer.setInterval(500)
+        self._dot_pulse_timer.timeout.connect(self._pulse_dot_tick)
         self._status_dot.setStyleSheet("color: #4CAF50;")
-        self._pulse_dot()
+        self._dot_pulse_timer.start()
 
-    def _pulse_dot(self) -> None:
+    def _pulse_dot_tick(self) -> None:
+        """Toggle the dot between bright and dim via stylesheet — no opacity effect."""
         if not getattr(self, "_dot_pulse_going", False):
             return
-        self._dot_anim = fade_out(
-            self._status_dot, duration=500, start_value=1.0, end_value=0.2,
-            on_done=self._pulse_dot_in,
-        )
-
-    def _pulse_dot_in(self) -> None:
-        if not getattr(self, "_dot_pulse_going", False):
-            return
-        self._dot_anim = fade_in(
-            self._status_dot, duration=500, start_value=0.2, end_value=1.0,
-        )
-        self._dot_anim.finished.connect(self._pulse_dot)
+        self._dot_pulse_bright = not getattr(self, "_dot_pulse_bright", True)
+        if self._dot_pulse_bright:
+            self._status_dot.setStyleSheet("color: #4CAF50;")
+        else:
+            self._status_dot.setStyleSheet("color: rgba(76, 175, 80, 60);")
 
     def _stop_status_indicator(self) -> None:
         self._dot_pulse_going = False
+        timer = getattr(self, "_dot_pulse_timer", None)
+        if timer is not None:
+            timer.stop()
+            self._dot_pulse_timer = None
         self.status_row.hide()
         self._status_label.hide()
         self._status_dot.hide()
@@ -1338,37 +1401,37 @@ QLabel#assistantBubble {{
         self._status_label.setText(text)
 
     def _start_meta_pulse(self) -> None:
-        """Subtle repeating opacity pulse on meta_label while query is running."""
-        self._meta_pulse_anim = fade_in(
-            self.meta_label, duration=600, start_value=0.4, end_value=1.0
-        )
+        """Subtle repeating opacity pulse on meta_label while query is running.
+
+        Uses a QTimer toggling stylesheet alpha — no QGraphicsOpacityEffect,
+        so no QPainter conflicts with other animated widgets.
+        """
         self._meta_pulse_going = True
+        self._meta_pulse_bright = True
+        self._meta_pulse_timer = QTimer(self)
+        self._meta_pulse_timer.setInterval(600)
+        self._meta_pulse_timer.timeout.connect(self._meta_pulse_tick)
+        self.meta_label.setStyleSheet("color: rgba(255,255,255,255);")
+        self._meta_pulse_timer.start()
 
-        def _pulse_again() -> None:
-            if not self._meta_pulse_going:
-                return
-            self._meta_pulse_anim = fade_out(
-                self.meta_label, duration=600, start_value=1.0, end_value=0.4,
-                on_done=_pulse_in,
-            )
-
-        def _pulse_in() -> None:
-            if not self._meta_pulse_going:
-                return
-            self._meta_pulse_anim = fade_in(
-                self.meta_label, duration=600, start_value=0.4, end_value=1.0
-            )
-            self._meta_pulse_anim.finished.connect(_pulse_again)
-
-        self._meta_pulse_anim.finished.connect(_pulse_again)
+    def _meta_pulse_tick(self) -> None:
+        """Toggle meta_label between bright and dim via stylesheet."""
+        if not self._meta_pulse_going:
+            return
+        self._meta_pulse_bright = not getattr(self, "_meta_pulse_bright", True)
+        if self._meta_pulse_bright:
+            self.meta_label.setStyleSheet("color: rgba(255,255,255,255);")
+        else:
+            self.meta_label.setStyleSheet("color: rgba(255,255,255,100);")
 
     def _stop_meta_pulse(self) -> None:
         """Stop pulse and restore meta_label to full opacity."""
         self._meta_pulse_going = False
-        from PySide6.QtWidgets import QGraphicsOpacityEffect
-        effect = self.meta_label.graphicsEffect()
-        if isinstance(effect, QGraphicsOpacityEffect):
-            effect.setOpacity(1.0)
+        timer = getattr(self, "_meta_pulse_timer", None)
+        if timer is not None:
+            timer.stop()
+            self._meta_pulse_timer = None
+        self.meta_label.setStyleSheet("")
 
     # ------------------------------------------------------------------
     # Dialogs

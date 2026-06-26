@@ -4,6 +4,12 @@ Provides a small set of QPropertyAnimation wrappers to be used app-wide.
 All helpers are safe to call under QT_QPA_PLATFORM=offscreen (headless) —
 they construct and start the animations without relying on a visible display.
 
+NOTE: fade_in / fade_out deliberately avoid QGraphicsOpacityEffect when the
+widget already has an effect applied by a concurrent animation, to prevent the
+QPainter "Painter not active" flood that occurs when multiple effects paint the
+same widget simultaneously.  Callers that need continuous pulsing should use
+the stylesheet-based helpers in this module instead of chaining fade_in/fade_out.
+
 Usage::
 
     from windows.anim import fade_in, fade_out, slide_in
@@ -32,11 +38,25 @@ from PySide6.QtWidgets import QGraphicsOpacityEffect, QWidget
 # ---------------------------------------------------------------------------
 
 def _ensure_opacity_effect(widget: QWidget) -> QGraphicsOpacityEffect:
-    """Attach a QGraphicsOpacityEffect to *widget* if it doesn't have one yet."""
+    """Attach a QGraphicsOpacityEffect to *widget* if it doesn't have one yet.
+
+    IMPORTANT: If a QPropertyAnimation is already running on the existing
+    effect, we stop it first so we never have two painters on the same device.
+    """
     effect = widget.graphicsEffect()
     if not isinstance(effect, QGraphicsOpacityEffect):
         effect = QGraphicsOpacityEffect(widget)
         widget.setGraphicsEffect(effect)
+
+    # If a previous animation is still running, stop it cleanly
+    old_anim = getattr(widget, "_anim_ref", None)
+    if old_anim is not None:
+        try:
+            old_anim.stop()
+        except RuntimeError:
+            pass  # C++ object already deleted
+        widget._anim_ref = None  # type: ignore[attr-defined]
+
     return effect  # type: ignore[return-value]
 
 
@@ -44,6 +64,26 @@ def _run_once(anim: QPropertyAnimation, widget: QWidget) -> QPropertyAnimation:
     """Keep a reference to *anim* on *widget* so it isn't garbage-collected."""
     widget._anim_ref = anim  # type: ignore[attr-defined]
     return anim
+
+
+def _remove_effect_on_finish(anim: QPropertyAnimation, widget: QWidget) -> None:
+    """Connect *anim*.finished to remove the graphics effect from *widget*.
+
+    Removing the effect when the animation is done prevents stale painters
+    from remaining attached to the widget tree.
+    """
+    def _cleanup():
+        try:
+            if widget and not widget.isVisible() is False:  # widget still alive check
+                widget._anim_ref = None  # type: ignore[attr-defined]
+                # Only remove effect if nothing else re-attached one
+                effect = widget.graphicsEffect()
+                if isinstance(effect, QGraphicsOpacityEffect):
+                    widget.setGraphicsEffect(None)
+        except RuntimeError:
+            pass  # C++ object deleted
+
+    anim.finished.connect(_cleanup)
 
 
 # ---------------------------------------------------------------------------
@@ -56,10 +96,13 @@ def fade_in(
     *,
     start_value: float = 0.0,
     end_value: float = 1.0,
+    remove_effect_on_done: bool = True,
 ) -> QPropertyAnimation:
     """Fade *widget* in from transparent to opaque.
 
     Returns the running QPropertyAnimation (caller may connect signals).
+    The graphics effect is removed when the animation finishes (so no stale
+    painter references remain).
     """
     effect = _ensure_opacity_effect(widget)
     anim = QPropertyAnimation(effect, b"opacity", widget)
@@ -68,6 +111,8 @@ def fade_in(
     anim.setEndValue(end_value)
     anim.setEasingCurve(QEasingCurve.Type.OutCubic)
     widget.show()
+    if remove_effect_on_done:
+        _remove_effect_on_finish(anim, widget)
     anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
     return _run_once(anim, widget)
 
@@ -79,10 +124,12 @@ def fade_out(
     start_value: float = 1.0,
     end_value: float = 0.0,
     on_done: Callable[[], None] | None = None,
+    remove_effect_on_done: bool = True,
 ) -> QPropertyAnimation:
     """Fade *widget* out.  Calls *on_done* when the animation finishes.
 
     A common pattern is ``on_done=widget.hide``.
+    The graphics effect is removed after *on_done* so no stale painters remain.
     """
     effect = _ensure_opacity_effect(widget)
     anim = QPropertyAnimation(effect, b"opacity", widget)
@@ -92,6 +139,8 @@ def fade_out(
     anim.setEasingCurve(QEasingCurve.Type.OutCubic)
     if on_done is not None:
         anim.finished.connect(on_done)
+    if remove_effect_on_done:
+        _remove_effect_on_finish(anim, widget)
     anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
     return _run_once(anim, widget)
 
