@@ -122,8 +122,19 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             }
             retriever = r
 
-            // Check if GGUF model is already present
-            val ggufFile = File(getApplication<Application>().filesDir, "models/$GGUF_FILENAME")
+            // Check if GGUF model is already present.
+            // Resolve order: internal filesDir/models first (installed via SAF import),
+            // then external files dir which adb can write to without root:
+            //   /sdcard/Android/data/com.varian.engcomp/files/models/
+            val app = getApplication<Application>()
+            val internalGguf = File(app.filesDir, "models/$GGUF_FILENAME")
+            val externalGguf = File(app.getExternalFilesDir("models"), GGUF_FILENAME)
+            val ggufFile: File = when {
+                internalGguf.exists() && internalGguf.length() > 0 -> internalGguf
+                externalGguf.exists() && externalGguf.length() > 0 -> externalGguf
+                else -> internalGguf  // canonical missing-file path (for error messages)
+            }
+            Log.i(TAG, "initEngine: GGUF probe — internal=${internalGguf.exists()} external=${externalGguf.exists()} → using ${ggufFile.absolutePath}")
             if (ggufFile.exists() && ggufFile.length() > 0) {
                 Log.i(TAG, "initEngine: GGUF found at ${ggufFile.absolutePath}, loading ...")
                 updateStage("Загрузка LLM", "инициализация …")

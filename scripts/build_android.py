@@ -39,6 +39,13 @@ EMBEDDER_ONNX = (
     / "app/src/main/assets/models/embedder_onnx/model.onnx"
 )
 
+# ---------------------------------------------------------------------------
+# Resolve the .venv-win interpreter so host sub-scripts get the right deps.
+# Fall back to sys.executable only if the venv python is absent.
+# ---------------------------------------------------------------------------
+_VENV_PYTHON = REPO / ".venv-win" / "Scripts" / "python.exe"
+VENV_PYTHON: str = str(_VENV_PYTHON) if _VENV_PYTHON.exists() else sys.executable
+
 OPTIMUM_EXPORT_HINT = (
     "optimum-cli export onnx "
     '--model sentence-transformers/e5-small-v2 '
@@ -154,9 +161,9 @@ def regenerate_artifacts(skip: bool = False) -> bool:
     # --- flat binary index ---
     index_script = SCRIPTS_DIR / "build_android_index.py"
     if index_script.exists():
-        print(f"  Running {index_script.name} ...")
+        print(f"  Running {index_script.name} (python: {VENV_PYTHON}) ...")
         result = subprocess.run(
-            [sys.executable, str(index_script)],
+            [VENV_PYTHON, str(index_script)],
             cwd=str(REPO),
         )
         if result.returncode == 0:
@@ -170,9 +177,9 @@ def regenerate_artifacts(skip: bool = False) -> bool:
     # --- tokenizer.onnx ---
     tok_script = SCRIPTS_DIR / "gen_tokenizer_onnx.py"
     if tok_script.exists():
-        print(f"  Running {tok_script.name} ...")
+        print(f"  Running {tok_script.name} (python: {VENV_PYTHON}) ...")
         result = subprocess.run(
-            [sys.executable, str(tok_script)],
+            [VENV_PYTHON, str(tok_script)],
             cwd=str(REPO),
         )
         if result.returncode == 0:
