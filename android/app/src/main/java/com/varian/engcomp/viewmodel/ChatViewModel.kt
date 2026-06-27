@@ -10,6 +10,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.varian.engcomp.data.Conversation
 import com.varian.engcomp.data.ConversationStore
+import com.varian.engcomp.data.SettingsStore
 import com.varian.engcomp.data.Turn
 import com.varian.engcomp.engine.AssetCopier
 import com.varian.engcomp.engine.FakeRagEngine
@@ -67,6 +68,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private val store = ConversationStore(application)
+    private val settings = SettingsStore(application)
 
     // Start with FakeRagEngine so the UI is immediately usable while models load.
     private var engine: RagEngine = FakeRagEngine()
@@ -90,6 +92,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         // ~23 MB index, which takes ~1–2 s on device.
         viewModelScope.launch(Dispatchers.IO) {
             initEngine()
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            settings.isDarkTheme.collect { dark ->
+                _uiState.value = _uiState.value.copy(isDarkTheme = dark)
+            }
         }
     }
 
@@ -392,6 +399,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun toggleTheme() {
-        _uiState.value = _uiState.value.copy(isDarkTheme = !_uiState.value.isDarkTheme)
+        val newDark = !_uiState.value.isDarkTheme
+        _uiState.value = _uiState.value.copy(isDarkTheme = newDark)
+        viewModelScope.launch(Dispatchers.IO) {
+            settings.setDarkTheme(newDark)
+        }
     }
 }

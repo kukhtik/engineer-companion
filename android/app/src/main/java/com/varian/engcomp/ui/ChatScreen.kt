@@ -27,15 +27,20 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Delete
@@ -57,6 +62,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.NavigationDrawerItem
@@ -71,6 +77,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberDrawerState
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -86,6 +93,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.varian.engcomp.data.Conversation
@@ -105,6 +113,7 @@ fun ChatScreen(viewModel: ChatViewModel) {
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
     val context = LocalContext.current
+    var selectedSource by remember { mutableStateOf<SearchResult?>(null) }
 
     ModalNavigationDrawer(
         drawerState = drawerState,
@@ -230,14 +239,20 @@ fun ChatScreen(viewModel: ChatViewModel) {
                                     clipboard.setPrimaryClip(ClipData.newPlainText("answer", displayContent))
                                     scope.launch { snackbarHostState.showSnackbar("Скопировано") }
                                 },
-                                onSourceClick = {
-                                    scope.launch { snackbarHostState.showSnackbar("Просмотр страницы — скоро") }
-                                },
+                                onSourceClick = { src -> selectedSource = src },
                                 colors = colors
                             )
                         }
                     }
                 }
+            }
+
+            selectedSource?.let { src ->
+                SourceDetailSheet(
+                    source = src,
+                    colors = colors,
+                    onDismiss = { selectedSource = null }
+                )
             }
         }
     }
@@ -274,7 +289,7 @@ fun AssistantBubble(
     turnIndex: Int,
     onToggleStar: () -> Unit,
     onCopy: () -> Unit,
-    onSourceClick: () -> Unit,
+    onSourceClick: (SearchResult) -> Unit,
     colors: com.varian.engcomp.ui.theme.AppColors
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
@@ -303,7 +318,7 @@ fun AssistantBubble(
         if (turn.sources.isNotEmpty()) {
             Spacer(Modifier.height(4.dp))
             turn.sources.forEach { src ->
-                SourceCard(source = src, onClick = onSourceClick, colors = colors)
+                SourceCard(source = src, onClick = { onSourceClick(src) }, colors = colors)
                 Spacer(Modifier.height(2.dp))
             }
         }
@@ -671,6 +686,110 @@ fun ConversationDrawer(
         )
 
         Spacer(Modifier.height(8.dp))
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SourceDetailSheet(
+    source: SearchResult,
+    colors: com.varian.engcomp.ui.theme.AppColors,
+    onDismiss: () -> Unit
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val scrollState = rememberScrollState()
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = colors.surface,
+        contentColor = colors.textPrimary,
+        dragHandle = null,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 16.dp)
+        ) {
+            // Title bar
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = source.source,
+                    color = colors.textPrimary,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 16.sp,
+                    modifier = Modifier.weight(1f)
+                )
+                IconButton(onClick = onDismiss) {
+                    Icon(
+                        Icons.Default.Close,
+                        contentDescription = "Закрыть",
+                        tint = colors.textMuted
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(8.dp))
+            Divider(color = colors.border)
+            Spacer(Modifier.height(12.dp))
+
+            // Metadata
+            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                Column {
+                    Text("Документ", color = colors.textMuted, fontSize = 10.sp)
+                    Text(source.source, color = colors.textSecondary, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                }
+                Column {
+                    Text("стр.", color = colors.textMuted, fontSize = 10.sp)
+                    Text("${source.page}", color = colors.textSecondary, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                }
+            }
+
+            if (source.section.isNotBlank()) {
+                Spacer(Modifier.height(4.dp))
+                Text("раздел: ${source.section}", color = colors.textMuted, fontSize = 11.sp)
+            }
+
+            Spacer(Modifier.height(16.dp))
+
+            // Chunk text - scrollable and selectable
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f, fill = false)
+                    .heightIn(min = 80.dp, max = 400.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(colors.elevated)
+                    .padding(12.dp)
+                    .verticalScroll(scrollState)
+            ) {
+                SelectionContainer {
+                    Text(
+                        text = source.text.ifBlank { "Текст фрагмента недоступен." },
+                        color = colors.textPrimary,
+                        fontSize = 13.sp,
+                        lineHeight = 20.sp
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(12.dp))
+
+            // Footer note
+            Text(
+                text = "Полный просмотр страницы PDF доступен в десктоп-версии.",
+                color = colors.textMuted,
+                fontSize = 10.sp,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            Spacer(Modifier.height(8.dp))
+        }
     }
 }
 
