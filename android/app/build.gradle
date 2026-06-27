@@ -14,8 +14,17 @@ android {
         versionCode 1
         versionName "0.1.0"
 
-        // Target arm64 only — no native build this phase; keeps APK sane for OnnxRuntime AAR
+        // Target arm64 only
         ndk { abiFilters "arm64-v8a" }
+
+        externalNativeBuild {
+            cmake {
+                arguments "-DANDROID_STL=c++_shared",
+                          "-DANDROID_PLATFORM=android-28",
+                          "-DCMAKE_BUILD_TYPE=Release"
+                cppFlags "-std=c++17"
+            }
+        }
     }
 
     buildTypes {
@@ -33,6 +42,15 @@ android {
 
     // Kotlin 1.9.22 → Compose compiler 1.5.8 (https://developer.android.com/jetpack/androidx/releases/compose-kotlin)
     composeOptions { kotlinCompilerExtensionVersion '1.5.8' }
+
+    ndkVersion "28.2.13676358"
+
+    externalNativeBuild {
+        cmake {
+            path "src/main/cpp/CMakeLists.txt"
+            version "3.22.1"
+        }
+    }
 
     // Prevent ONNX model and flat binary index from being compressed in the APK.
     // Large assets must remain uncompressed so they can be memory-mapped / read via AssetManager.
@@ -84,6 +102,6 @@ dependencies {
     // 0.13.0 is the latest stable on Maven Central (repo1.maven.org confirmed).
     implementation 'com.microsoft.onnxruntime:onnxruntime-extensions-android:0.13.0'
 
-    // NOTE: No externalNativeBuild / CMake / Chaquopy / MediaPipe this phase.
-    // CMake is not installed. Native build (llama.cpp JNI) comes in a later phase.
+    // Native build: llama.cpp JNI via CMake + FetchContent (Phase D Slice B).
+    // engineer_companion_jni.so is built from src/main/cpp/native-lib.cpp.
 }

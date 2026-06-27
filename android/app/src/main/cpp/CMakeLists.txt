@@ -1,21 +1,43 @@
 cmake_minimum_required(VERSION 3.22)
-project("engineercompanion")
+project("engineercompanion" CXX)
 
-# llama.cpp sources (pulled via CMake FetchContent or prebuilt)
-# Prebuilt .so files go to src/main/jniLibs/arm64-v8a/
-# This CMake builds the JNI wrapper that links against them.
+include(FetchContent)
 
+# ── llama.cpp via FetchContent ────────────────────────────────────────────────
+set(LLAMA_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_SERVER   OFF CACHE BOOL "" FORCE)
+set(GGML_OPENMP          OFF CACHE BOOL "" FORCE)
+# CPU-only; no Vulkan this phase
+set(GGML_VULKAN          OFF CACHE BOOL "" FORCE)
+set(GGML_METAL           OFF CACHE BOOL "" FORCE)
+set(GGML_CUDA            OFF CACHE BOOL "" FORCE)
+
+FetchContent_Declare(
+    llama
+    GIT_REPOSITORY https://github.com/ggml-org/llama.cpp.git
+    GIT_TAG        b4600
+    GIT_SHALLOW    TRUE
+    GIT_PROGRESS   TRUE
+)
+FetchContent_MakeAvailable(llama)
+
+# ── JNI wrapper ───────────────────────────────────────────────────────────────
 add_library(engineer_companion_jni SHARED native-lib.cpp)
 
-# Find system log lib
 find_library(log-lib log)
+find_library(android-lib android)
 
 target_link_libraries(engineer_companion_jni
+    llama
+    ggml
     ${log-lib}
-    # libllama.so and libggml.so are prebuilt and placed in jniLibs
-    # They are linked automatically by Android build system
+    ${android-lib}
 )
 
 target_include_directories(engineer_companion_jni PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/../jniLibs/arm64-v8a/include
+    ${llama_SOURCE_DIR}/include
+    ${llama_SOURCE_DIR}/ggml/include
 )
+
+target_compile_options(engineer_companion_jni PRIVATE -std=c++17)

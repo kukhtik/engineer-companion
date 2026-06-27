@@ -1,17 +1,20 @@
 package com.varian.engcomp.viewmodel
 
 import android.app.Application
+import android.net.Uri
+import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import android.util.Log
 import com.varian.engcomp.data.Conversation
 import com.varian.engcomp.data.ConversationStore
 import com.varian.engcomp.data.Turn
 import com.varian.engcomp.engine.AssetCopier
 import com.varian.engcomp.engine.FakeRagEngine
+import com.varian.engcomp.engine.FullRagEngine
+import com.varian.engcomp.engine.LlamaEngine
 import com.varian.engcomp.engine.OnnxRagEngine
 import com.varian.engcomp.engine.OnnxRetriever
 import com.varian.engcomp.engine.RagEngine
@@ -23,6 +26,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.FileOutputStream
 
 data class ActivityStage(
     val label: String,
@@ -45,12 +50,20 @@ data class ChatUiState(
     val engineLoading: Boolean = true,
     /** Non-null if the engine failed to initialize; UI can show FakeRagEngine fallback. */
     val engineError: String? = null,
+    /** True when the GGUF model is installed and ready for generation. */
+    val modelInstalled: Boolean = false,
+    /** -1f = idle / not copying, 0f..1f = copy progress. */
+    val modelCopyProgress: Float = -1f,
+    /** True when the model is absent and the user needs to install it. */
+    val showSetupScreen: Boolean = false,
 )
 
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     companion object {
         private const val TAG = "ChatViewModel"
+        private const val GGUF_FILENAME = "gemma-3-4b-it-Q4_K_M.gguf"
+        private const val COPY_CHUNK = 256 * 1024  // 256 KB
     }
 
     private val store = ConversationStore(application)
@@ -58,6 +71,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     // Start with FakeRagEngine so the UI is immediately usable while models load.
     private var engine: RagEngine = FakeRagEngine()
     private var retriever: OnnxRetriever? = null  // kept for close()
+    private var llamaEngine: LlamaEngine? = null
 
     private val _uiState = MutableStateFlow(ChatUiState())
     val uiState: StateFlow<ChatUiState> = _uiState.asStateFlow()
@@ -100,10 +114,44 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
             retriever = r
-            engine = OnnxRagEngine(r)
-            Log.i(TAG, "initEngine: OnnxRagEngine ready")
 
-            _uiState.value = _uiState.value.copy(engineLoading = false, activityStage = null)
+            // Check if GGUF model is already present
+            val ggufFile = File(getApplication<Application>().filesDir, "models/$GGUF_FILENAME")
+            if (ggufFile.exists() && ggufFile.length() > 0) {
+                Log.i(TAG, "initEngine: GGUF found at ${ggufFile.absolutePath}, loading ...")
+                updateStage("Загрузка LLM", "инициализация …")
+                val llama = LlamaEngine()
+                val ok = llama.loadModel(ggufFile.absolutePath)
+                if (ok) {
+                    llamaEngine = llama
+                    engine = FullRagEngine(r, llama)
+                    Log.i(TAG, "initEngine: FullRagEngine ready")
+                    _uiState.value = _uiState.value.copy(
+                        engineLoading  = false,
+                        modelInstalled = true,
+                        showSetupScreen = false,
+                        activityStage  = null,
+                    )
+                } else {
+                    Log.w(TAG, "initEngine: GGUF found but load failed, falling back to OnnxRagEngine")
+                    engine = OnnxRagEngine(r)
+                    _uiState.value = _uiState.value.copy(
+                        engineLoading  = false,
+                        modelInstalled = false,
+                        showSetupScreen = true,
+                        activityStage  = null,
+                    )
+                }
+            } else {
+                Log.i(TAG, "initEngine: GGUF not found, using OnnxRagEngine (stub generation)")
+                engine = OnnxRagEngine(r)
+                _uiState.value = _uiState.value.copy(
+                    engineLoading  = false,
+                    modelInstalled = false,
+                    showSetupScreen = true,
+                    activityStage  = null,
+                )
+            }
         } catch (e: Exception) {
             Log.e(TAG, "initEngine failed: $e", e)
             // Fall back to FakeRagEngine; engine field already points to it
@@ -115,9 +163,101 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * Import the GGUF model from the given SAF [uri].
+     * Copies the file to filesDir/models/gemma-3-4b-it-Q4_K_M.gguf in 256 KB chunks,
+     * reporting progress via [ChatUiState.modelCopyProgress].
+     * On success, loads the model into LlamaEngine and switches to FullRagEngine.
+     */
+    fun importModel(uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val app = getApplication<Application>()
+            val modelsDir = File(app.filesDir, "models")
+            modelsDir.mkdirs()
+            val destFile = File(modelsDir, GGUF_FILENAME)
+
+            try {
+                _uiState.value = _uiState.value.copy(modelCopyProgress = 0f)
+
+                val cr = app.contentResolver
+                val size = cr.openFileDescriptor(uri, "r")?.use { pfd ->
+                    pfd.statSize
+                } ?: -1L
+
+                cr.openInputStream(uri)?.use { input ->
+                    FileOutputStream(destFile).use { output ->
+                        val buf = ByteArray(COPY_CHUNK)
+                        var totalRead = 0L
+                        var n: Int
+                        while (input.read(buf).also { n = it } != -1) {
+                            output.write(buf, 0, n)
+                            totalRead += n
+                            val progress = if (size > 0) totalRead.toFloat() / size.toFloat() else 0f
+                            _uiState.value = _uiState.value.copy(
+                                modelCopyProgress = progress.coerceIn(0f, 0.99f)
+                            )
+                        }
+                    }
+                } ?: run {
+                    Log.e(TAG, "importModel: could not open input stream for $uri")
+                    _uiState.value = _uiState.value.copy(
+                        modelCopyProgress = -1f,
+                        engineError = "Не удалось открыть файл",
+                    )
+                    return@launch
+                }
+
+                Log.i(TAG, "importModel: copy complete, loading model ...")
+                _uiState.value = _uiState.value.copy(modelCopyProgress = 1f)
+
+                // Load into LlamaEngine
+                val llama = LlamaEngine()
+                val ok = llama.loadModel(destFile.absolutePath)
+                if (ok) {
+                    val r = retriever
+                    if (r != null) {
+                        // Free old llama if any
+                        llamaEngine?.freeSync()
+                        llamaEngine = llama
+                        engine = FullRagEngine(r, llama)
+                        Log.i(TAG, "importModel: FullRagEngine switched in")
+                    } else {
+                        Log.w(TAG, "importModel: retriever not ready yet; model loaded but engine not switched")
+                        llamaEngine = llama
+                    }
+                    _uiState.value = _uiState.value.copy(
+                        modelInstalled    = true,
+                        modelCopyProgress = -1f,
+                        showSetupScreen   = false,
+                    )
+                } else {
+                    Log.e(TAG, "importModel: model load failed after copy")
+                    destFile.delete()
+                    _uiState.value = _uiState.value.copy(
+                        modelCopyProgress = -1f,
+                        engineError = "Файл скопирован, но не удалось загрузить модель. Проверьте файл.",
+                    )
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "importModel: exception", e)
+                destFile.delete()
+                _uiState.value = _uiState.value.copy(
+                    modelCopyProgress = -1f,
+                    engineError = "Ошибка импорта: ${e.message}",
+                )
+            }
+        }
+    }
+
+    /** Dismiss the setup screen and go to chat (model must already be installed). */
+    fun onSetupDone() {
+        _uiState.value = _uiState.value.copy(showSetupScreen = false)
+    }
+
     override fun onCleared() {
         super.onCleared()
         try { retriever?.close() } catch (_: Exception) {}
+        llamaEngine?.freeSync()
     }
 
     fun send(query: String) {
