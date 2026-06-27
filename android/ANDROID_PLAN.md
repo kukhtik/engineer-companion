@@ -2,7 +2,7 @@
 
 ## Статус реализации (готово)
 
-Реализовано и собрано (`assembleDebug` → `app-debug.apk` ~564 MB):
+Реализовано и собрано (`assembleDebug` → `app-debug.apk` ~564 MB, ожидается ~350 MB после FP16):
 
 - **Хостовые артефакты:** ONNX-экспорт эмбеддера (e5-small-v2, ~100 MB), `tokenizer.onnx` с паритетом косинуса = 1.0 по отношению к HF-токенизатору, плоский бинарный индекс (`chunks_index.bin`, 11 629 чанков из `engineer.db`).
 - **Сборочная система:** `app/build.gradle` — ONNX Runtime Android, двойная тема (Dribbble Dark + светлая), `externalNativeBuild` / CMake, `abiFilters "arm64-v8a"`.
@@ -16,7 +16,7 @@
 
 **Остаток / TODO:**
 - On-device верификация на Samsung S25: установка APK, push GGUF (2.4 GB), проверка загрузки `OrtxPackage` native lib, паритет токенизатора на устройстве, замер скорости генерации.
-- Доставка модели в продакшене: APK 564 MB включает `model.onnx` 448 MB — для Google Play нужна Play Asset Delivery или загрузка по требованию.
+- Доставка модели в продакшене: APK ~350 MB включает `model.onnx` FP16 (224 MB, сокращение с 448 MB FP32 — экономия ~215 MB); для Google Play всё равно нужна Play Asset Delivery или загрузка по требованию.
 - Опциональное Vulkan-ускорение для LLM (Adreno 750: ожидаемо ~25–40 tok/s vs ~8–15 tok/s CPU).
 - Сохранение темы через DataStore (сейчас не персистируется).
 - PDF/page viewer на Android (тап на источник сейчас показывает TODO-тост).

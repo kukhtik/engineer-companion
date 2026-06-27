@@ -184,6 +184,12 @@ def regenerate_artifacts(skip: bool = False) -> bool:
         _warn(f"Tokenizer script not found: {tok_script}  (skipping).")
 
     # --- embedder ONNX model.onnx (heavy — NOT auto-run) ---
+    # model.onnx must be the FP16 version (~224 MB, down from 448 MB FP32).
+    # To regenerate it from scratch run (once, takes ~1-2 min):
+    #   python scripts/quantize_embedder_onnx.py
+    # That script converts FP32→FP16, patches Cast nodes, and writes
+    # model_fp16_fixed.onnx. Then adopt it with:
+    #   Copy-Item .../model_fp16_fixed.onnx .../model.onnx -Force
     if EMBEDDER_ONNX.exists():
         size_mb = EMBEDDER_ONNX.stat().st_size / (1024 ** 2)
         _ok(f"Embedder ONNX present: {EMBEDDER_ONNX}  ({size_mb:.0f} MB)")
