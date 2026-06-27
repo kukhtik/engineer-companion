@@ -6,7 +6,7 @@
     match the dark background on launch without a white flash.
 -->
 <resources>
-    <style name="Theme.EngineerCompanion" parent="Theme.Material3.DayNight.NoActionBar">
+    <style name="Theme.EngineerCompanion" parent="android:Theme.Material.Light.NoActionBar">
         <item name="android:windowBackground">#0A0A0A</item>
         <item name="android:statusBarColor">#0A0A0A</item>
         <item name="android:navigationBarColor">#0A0A0A</item>

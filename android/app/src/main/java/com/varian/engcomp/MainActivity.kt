@@ -1,124 +1,23 @@
 package com.varian.engcomp
 
 import android.os.Bundle
-import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import com.varian.engcomp.ui.AnswerPanel
-import com.varian.engcomp.ui.SourcesList
-import com.varian.engcomp.ui.theme.DribbbleDark
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.varian.engcomp.ui.ChatScreen
 import com.varian.engcomp.ui.theme.EngineerCompanionTheme
-import com.varian.engcomp.viewmodel.SearchViewModel
+import com.varian.engcomp.viewmodel.ChatViewModel
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            // TODO(persist): wire darkTheme to a ThemeViewModel / DataStore toggle
-            EngineerCompanionTheme(darkTheme = true) {
-                SearchScreen()
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun SearchScreen(viewModel: SearchViewModel = androidx.lifecycle.viewmodel.compose.viewModel()) {
-    val query by viewModel.query.collectAsState()
-    val sources by viewModel.sources.collectAsState()
-    val answer by viewModel.answer.collectAsState()
-    val isSearching by viewModel.isSearching.collectAsState()
-    val error by viewModel.error.collectAsState()
-    val dbInfo by viewModel.dbInfo.collectAsState()
-
-    LaunchedEffect(error) {
-        error?.let { msg ->
-            // Toast needs context — use LocalContext
-        }
-    }
-
-    Surface(
-        modifier = Modifier.fillMaxSize(),
-        color = DribbbleDark.bgBase
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(12.dp)
-        ) {
-            // DB info bar
-            Text(
-                text = dbInfo,
-                color = DribbbleDark.textMuted,
-                fontSize = 11.sp,
-                modifier = Modifier.padding(bottom = 4.dp)
-            )
-
-            // Search bar
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                OutlinedTextField(
-                    value = query,
-                    onValueChange = { viewModel.onQueryChanged(it) },
-                    placeholder = {
-                        Text("Вопрос по TrueBeam / VitalBeam...", color = DribbbleDark.textMuted)
-                    },
-                    modifier = Modifier.weight(1f),
-                    singleLine = true,
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = DribbbleDark.accentCyan,
-                        unfocusedBorderColor = DribbbleDark.borderColor,
-                        focusedTextColor = DribbbleDark.textPrimary,
-                        unfocusedTextColor = DribbbleDark.textPrimary,
-                        cursorColor = DribbbleDark.accentCyan,
-                    ),
-                    shape = RoundedCornerShape(8.dp),
-                )
-
-                Button(
-                    onClick = { viewModel.search() },
-                    enabled = !isSearching && query.isNotBlank(),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = DribbbleDark.accentCyan,
-                        contentColor = DribbbleDark.textPrimary
-                    ),
-                    shape = RoundedCornerShape(8.dp),
-                ) {
-                    Text(if (isSearching) "..." else "Найти")
-                }
-            }
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            // Answer area
-            AnswerPanel(answer = answer, isLoading = isSearching)
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Sources
-            SourcesList(sources = sources)
-
-            // Loading indicator
-            if (isSearching) {
-                LinearProgressIndicator(
-                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                    color = DribbbleDark.accentCyan,
-                    trackColor = DribbbleDark.borderColor,
-                )
+            val chatViewModel: ChatViewModel = viewModel()
+            val uiState by chatViewModel.uiState.collectAsState()
+            EngineerCompanionTheme(darkTheme = uiState.isDarkTheme) {
+                ChatScreen(viewModel = chatViewModel)
             }
         }
     }

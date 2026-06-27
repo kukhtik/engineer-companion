@@ -42,3 +42,8 @@ conversations.json
 *.onnx
 android/app/src/main/assets/models/embedder_onnx/
 android/app/src/main/assets/db/chunks_index.bin
+
+# Android local/machine files
+android/local.properties
+android/.gradle/
+.gradle/

@@ -90,7 +90,7 @@ val LocalAppColors = staticCompositionLocalOf { DarkAppColors }
 // Material3 ColorScheme mappings
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 
-private fun darkM3Scheme(): ColorScheme = darkColorScheme(
+internal fun darkM3Scheme(): ColorScheme = darkColorScheme(
     primary            = DarkTokens.Accent,
     onPrimary          = DarkTokens.AccentInk,
     primaryContainer   = DarkTokens.Elevated,
@@ -109,7 +109,7 @@ private fun darkM3Scheme(): ColorScheme = darkColorScheme(
     onError            = DarkTokens.TextPrimary,
 )
 
-private fun lightM3Scheme(): ColorScheme = lightColorScheme(
+internal fun lightM3Scheme(): ColorScheme = lightColorScheme(
     primary            = LightTokens.Accent,
     onPrimary          = LightTokens.AccentInk,
     primaryContainer   = LightTokens.Surface,
