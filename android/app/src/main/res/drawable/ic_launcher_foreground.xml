@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Adaptive icon foreground — 108dp x 108dp canvas, safe zone = inner 72dp (18dp margin each side).
+  Design: bold yellow chat-bubble outline with a 4-point spark inside; small red accent dot.
+  All paths use Android VectorDrawable <path> syntax (no <line> or <circle> tags).
+  Glyph fits within safe zone (18..90dp), centered around (54, 44).
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!--
+      Chat bubble: rounded rect body 29..79 x 22..66 with tail pointing down-left.
+      Drawn as a single closed path, stroke only (hollow).
+    -->
+    <path
+        android:strokeColor="#F5C518"
+        android:strokeWidth="4.5"
+        android:fillColor="#00000000"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M 38,22 L 74,22 Q 79,22 79,27 L 79,61 Q 79,66 74,66 L 42,66 L 33,76 L 33,66 Q 28,66 28,61 L 28,27 Q 28,22 33,22 Z" />
+
+    <!--
+      4-point spark centered at (54,44).
+      Each arm encoded as a move + line path; all with round caps.
+      Vertical arm: (54,36)→(54,52)
+      Horizontal arm: (46,44)→(62,44)
+      Diagonal NW-SE: (48.3,38.3)→(59.7,49.7)
+      Diagonal NE-SW: (59.7,38.3)→(48.3,49.7)
+      Combined into one path using M..L segments (stroke only, no fill).
+    -->
+    <path
+        android:strokeColor="#F5C518"
+        android:strokeWidth="4"
+        android:fillColor="#00000000"
+        android:strokeLineCap="round"
+        android:pathData="M 54,36 L 54,52 M 46,44 L 62,44 M 48.3,38.3 L 59.7,49.7 M 59.7,38.3 L 48.3,49.7" />
+
+    <!--
+      Red accent dot at upper-right tip of the spark (~NE diagonal tip),
+      drawn as a circle via arc path. Center (62, 36.5), radius 3.5.
+    -->
+    <path
+        android:fillColor="#E5382B"
+        android:pathData="M 58.5,36.5 A 3.5,3.5 0 1 0 65.5,36.5 A 3.5,3.5 0 1 0 58.5,36.5 Z" />
+
+</vector>
