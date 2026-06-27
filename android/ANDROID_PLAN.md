@@ -1,5 +1,62 @@
 # Android — план реализации (сводный, заменяет PLAN.md)
 
+## Статус реализации (готово)
+
+Реализовано и собрано (`assembleDebug` → `app-debug.apk` ~564 MB):
+
+- **Хостовые артефакты:** ONNX-экспорт эмбеддера (e5-small-v2, ~100 MB), `tokenizer.onnx` с паритетом косинуса = 1.0 по отношению к HF-токенизатору, плоский бинарный индекс (`chunks_index.bin`, 11 629 чанков из `engineer.db`).
+- **Сборочная система:** `app/build.gradle` — ONNX Runtime Android, двойная тема (Dribbble Dark + светлая), `externalNativeBuild` / CMake, `abiFilters "arm64-v8a"`.
+- **Compose UI:** чат-центричный интерфейс — боковой DrawerRail, пузыри сообщений, карточки источников, стадии активности, избранное, удаление чатов, потоковый вывод, две темы.
+- **OnnxRetriever:** реальный on-device ретрив (ONNX Runtime), фильтр мусорных чанков, top-K косинусный поиск.
+- **llama.cpp b4600:** кросс-компиляция для arm64 через NDK/CMake (все `.so`-библиотеки включены в APK).
+- **LlamaEngine + JNI:** обёртка с корутин-Mutex, потоковая генерация токенов.
+- **PromptBuilder:** шаблон на русском (порт из `core/query.py`).
+- **FullRagEngine:** полный пайплайн retrieve → prompt → generate на `Dispatchers.IO`.
+- **SetupScreen:** SAF-пикер для импорта GGUF пользователем.
+
+**Остаток / TODO:**
+- On-device верификация на Samsung S25: установка APK, push GGUF (2.4 GB), проверка загрузки `OrtxPackage` native lib, паритет токенизатора на устройстве, замер скорости генерации.
+- Доставка модели в продакшене: APK 564 MB включает `model.onnx` 448 MB — для Google Play нужна Play Asset Delivery или загрузка по требованию.
+- Опциональное Vulkan-ускорение для LLM (Adreno 750: ожидаемо ~25–40 tok/s vs ~8–15 tok/s CPU).
+- Сохранение темы через DataStore (сейчас не персистируется).
+- PDF/page viewer на Android (тап на источник сейчас показывает TODO-тост).
+
+---
+
+## Тест на устройстве (S25)
+
+1. **Собрать APK:**
+   ```
+   cd android
+   .\gradlew.bat :app:assembleDebug
+   ```
+   Результат: `app\build\outputs\apk\debug\app-debug.apk`
+
+2. **Установить на устройство:**
+   ```
+   adb install -r app\build\outputs\apk\debug\app-debug.apk
+   ```
+
+3. **Доставить GGUF-модель (2.4 GB) — два варианта:**
+   - *Через SetupScreen (надёжный путь):*
+     ```
+     adb push assets\models\gemma-3-4b-it-Q4_K_M.gguf /sdcard/Download/
+     ```
+     Затем в приложении открыть SetupScreen и выбрать файл через SAF-пикер.
+   - *Напрямую в файлы приложения (требует `adb root` или `run-as`):*
+     ```
+     adb push assets\models\gemma-3-4b-it-Q4_K_M.gguf \
+         /data/data/com.varian.engcomp/files/models/gemma-3-4b-it-Q4_K_M.gguf
+     ```
+
+4. **Запустить и смотреть logcat:**
+   ```
+   adb logcat | findstr "engineer_companion EngineerCompanion ort llama"
+   ```
+   Искать: `UnsatisfiedLinkError` (`.so` не загрузилась), ошибки загрузки модели, проблемы токенизатора.
+
+---
+
 > Статус: ПЛАН, код не написан. Этот документ сводит два расходившихся подхода
 > (MediaPipe в `PLAN.md` против JNI/llama.cpp) в один выбранный путь.
 > Цель: довести Android-клиент от нерабочей Compose-заглушки до APK на Samsung S25.
