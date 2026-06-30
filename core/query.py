@@ -6,11 +6,27 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import structlog
 
+if TYPE_CHECKING:
+    from core.cloud import OllamaCloudClient
+    from core.cloud_usage import CloudUsageTracker
+
 logger = structlog.get_logger(__name__)
+
+# ---------------------------------------------------------------------------
+# Source-tag stripping (shared by local + cloud paths)
+# ---------------------------------------------------------------------------
+
+_SOURCE_TAG_RE = re.compile(r"\[ИСТОЧНИК\s*\d+(?:,\s*ИСТОЧНИК\s*\d+)*\]", re.IGNORECASE)
+
+
+def _strip_source_tags(text: str) -> str:
+    """Remove inline [ИСТОЧНИК N] citation tags from answer text."""
+    return _SOURCE_TAG_RE.sub("", text).strip()
+
 
 # ---------------------------------------------------------------------------
 # Query-time chunk quality filter
@@ -360,53 +376,209 @@ class RAGQueryPipeline:
             "completion_tokens": response.get("usage", {}).get("completion_tokens", 0),
         }
 
+    # ------------------------------------------------------------------
+    # Cloud generation helpers
+    # ------------------------------------------------------------------
+
+    def _build_cloud_messages(
+        self, query: str, hits: list[SearchResult], history: list[dict] | None
+    ) -> list[dict[str, str]]:
+        """Build OpenAI-style messages list for cloud chat API.
+
+        Constructs:
+          [system: SYSTEM_PERSONA]
+          + optional history turns (alternating user/assistant, last 3 pairs)
+          + [user: context block + question + RU steer]
+
+        This intentionally mirrors PromptBuilder.build() so persona/context/steer
+        are identical between local and cloud paths.
+        """
+        messages: list[dict[str, str]] = [
+            {"role": "system", "content": PromptBuilder.SYSTEM_PERSONA}
+        ]
+
+        # History turns (mirror PromptBuilder.build logic: last 3 turns, ≤300 chars each)
+        if history:
+            for turn in history[-3:]:
+                role = turn.get("role", "")
+                content = turn.get("content", "")
+                if role in ("user", "assistant") and content:
+                    messages.append({"role": role, "content": content[:300]})
+
+        # User message: context block + question + RU steer (matches PromptBuilder)
+        context_parts: list[str] = []
+        for i, h in enumerate(hits, 1):
+            context_parts.append(
+                f"[ИСТОЧНИК {i}] Документ: «{h.source}» стр.{h.page} раздел: {h.section}\n"
+                f"{h.text}"
+            )
+        context = "\n\n".join(context_parts)
+
+        user_content = (
+            f"КОНТЕКСТ:\n{context}\n\n"
+            f"ВОПРОС: {query}\n\nОТВЕТ НА РУССКОМ ЯЗЫКЕ:"
+        )
+        messages.append({"role": "user", "content": user_content})
+        return messages
+
     def ask_streaming(
-        self, query: str, on_event: Callable[[dict], None], history: list[dict] | None = None
+        self,
+        query: str,
+        on_event: Callable[[dict], None],
+        history: list[dict] | None = None,
+        # --- Cloud backend params (all optional; existing callers unaffected) ---
+        backend: str = "local",
+        cloud_model: str | None = None,
+        cloud_client: "OllamaCloudClient | None" = None,
+        usage_tracker: "CloudUsageTracker | None" = None,
     ) -> dict[str, Any]:
+        """Stream a RAG answer, emitting pipeline events via on_event.
+
+        Event shapes:
+          {"stage": "embed"}
+          {"stage": "search", "found": N}
+          {"stage": "rerank", "from": N, "to": M}   # only if reranker is loaded
+          {"stage": "prompt", "sources": N}
+          {"stage": "generate_start"}
+          {"stage": "token", "text": "<piece>"}
+          {"stage": "done", "answer": "...", "sources": [...], ...}
+          {"stage": "error", "message": "..."}        # on cloud errors
+
+        Args:
+            backend:       "local" (default) or "cloud".
+            cloud_model:   Model name for cloud backend (required when backend="cloud").
+            cloud_client:  OllamaCloudClient instance (required when backend="cloud").
+            usage_tracker: CloudUsageTracker instance for recording cloud usage.
+        """
+        # --- Retrieval (identical for both backends) ---
         hits = self.retriever.search_streaming(query, on_event)
-        prompt = self.builder.build(query, hits, history=history)
         context_meta = [
             {"source": h.source, "page": h.page, "section": h.section}
             for h in hits
         ]
-
         on_event({"stage": "prompt", "sources": len(hits)})
 
-        llm = self._get_llm()
-        if llm is None:
-            result: dict[str, Any] = {
-                "answer": "[LLM не загружена. Проверьте путь к модели.]",
+        # ================================================================
+        # LOCAL backend (unchanged)
+        # ================================================================
+        if backend != "cloud":
+            prompt = self.builder.build(query, hits, history=history)
+            llm = self._get_llm()
+            if llm is None:
+                result: dict[str, Any] = {
+                    "answer": "[LLM не загружена. Проверьте путь к модели.]",
+                    "sources": context_meta,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                }
+                on_event({"stage": "done", **result})
+                return result
+
+            on_event({"stage": "generate_start"})
+
+            tokens: list[str] = []
+            stream = llm.create_completion(
+                prompt=prompt,
+                max_tokens=self.max_tokens,
+                temperature=self.temperature,
+                stop=["</s>", "USER:", "ВОПРОС:"],
+                stream=True,
+            )
+            for chunk in stream:
+                chunk_text = chunk["choices"][0]["text"]
+                tokens.append(chunk_text)
+                on_event({"stage": "token", "text": chunk_text})
+
+            full_answer = "".join(tokens).strip()
+            result = {
+                "answer": full_answer,
                 "sources": context_meta,
                 "prompt_tokens": 0,
-                "completion_tokens": 0,
+                "completion_tokens": len(tokens),
             }
             on_event({"stage": "done", **result})
             return result
 
+        # ================================================================
+        # CLOUD backend
+        # ================================================================
+        from core.cloud import CloudError, CloudRateLimitError
+
+        if cloud_client is None or cloud_model is None:
+            err_result: dict[str, Any] = {
+                "answer": "[Облачный клиент не настроен.]",
+                "sources": context_meta,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+            }
+            on_event({"stage": "error", "message": "Облачный клиент не настроен."})
+            on_event({"stage": "done", **err_result})
+            return err_result
+
+        messages = self._build_cloud_messages(query, hits, history)
         on_event({"stage": "generate_start"})
 
-        tokens: list[str] = []
-        stream = llm.create_completion(
-            prompt=prompt,
-            max_tokens=self.max_tokens,
-            temperature=self.temperature,
-            stop=["</s>", "USER:", "ВОПРОС:"],
-            stream=True,
-        )
-        for chunk in stream:
-            chunk_text = chunk["choices"][0]["text"]
-            tokens.append(chunk_text)
-            on_event({"stage": "token", "text": chunk_text})
+        tokens_cloud: list[str] = []
+        usage_data: dict = {"prompt_tokens": 0, "completion_tokens": 0}
 
-        full_answer = "".join(tokens).strip()
-        result = {
-            "answer": full_answer,
+        def _on_done(stats: dict) -> None:
+            usage_data["prompt_tokens"] = stats.get("prompt_tokens", 0)
+            usage_data["completion_tokens"] = stats.get("completion_tokens", 0)
+
+        try:
+            for piece in cloud_client.chat_stream(
+                model=cloud_model,
+                messages=messages,
+                on_done=_on_done,
+            ):
+                tokens_cloud.append(piece)
+                on_event({"stage": "token", "text": piece})
+
+        except CloudRateLimitError as exc:
+            if usage_tracker is not None:
+                usage_tracker.mark_rate_limited(retry_after_seconds=exc.retry_after)
+            on_event({
+                "stage": "error",
+                "message": (
+                    "Лимит Ollama Cloud исчерпан. Сброс позже; переключитесь на локальную модель."
+                ),
+            })
+            rate_result: dict[str, Any] = {
+                "answer": "",
+                "sources": context_meta,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+            }
+            on_event({"stage": "done", **rate_result})
+            return rate_result
+
+        except CloudError as exc:
+            on_event({"stage": "error", "message": f"Ошибка Ollama Cloud: {exc}"})
+            cloud_err_result: dict[str, Any] = {
+                "answer": "",
+                "sources": context_meta,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+            }
+            on_event({"stage": "done", **cloud_err_result})
+            return cloud_err_result
+
+        # Success path
+        if usage_tracker is not None:
+            usage_tracker.record_request(
+                prompt_tokens=usage_data["prompt_tokens"],
+                completion_tokens=usage_data["completion_tokens"],
+            )
+
+        full_answer_cloud = _strip_source_tags("".join(tokens_cloud))
+        cloud_result: dict[str, Any] = {
+            "answer": full_answer_cloud,
             "sources": context_meta,
-            "prompt_tokens": 0,
-            "completion_tokens": len(tokens),
+            "prompt_tokens": usage_data["prompt_tokens"],
+            "completion_tokens": usage_data["completion_tokens"],
         }
-        on_event({"stage": "done", **result})
-        return result
+        on_event({"stage": "done", **cloud_result})
+        return cloud_result
 
 
 if __name__ == "__main__":

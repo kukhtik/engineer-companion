@@ -47,3 +47,6 @@ android/app/src/main/assets/db/chunks_index.bin
 android/local.properties
 android/.gradle/
 .gradle/
+
+# Cloud usage tracking (dev copy at repo root)
+cloud_usage.json
