@@ -17,6 +17,7 @@ Phase C changes:
 import html
 import json
 import re
+import socket
 import sys
 import time
 import uuid
@@ -312,27 +313,54 @@ class QueryWorker(QThread):
     result_ready = Signal(dict)
     event_received = Signal(dict)
     error = Signal(str)
+    backend_used = Signal(str)  # "local" | "cloud"
 
-    def __init__(self, pipeline, query: str, history=None) -> None:
+    def __init__(
+        self,
+        pipeline,
+        query: str,
+        history=None,
+        backend: str = "local",
+        cloud_model: str | None = None,
+        cloud_client=None,
+        usage_tracker=None,
+    ) -> None:
         super().__init__()
         self.pipeline = pipeline
         self.query = query
         self.history = history
+        self.backend = backend
+        self.cloud_model = cloud_model
+        self.cloud_client = cloud_client
+        self.usage_tracker = usage_tracker
 
     def run(self) -> None:
         try:
             if hasattr(self.pipeline, "ask_streaming"):
                 try:
-                    result = self.pipeline.ask_streaming(self.query, self._emit_event, history=self.history)
+                    result = self.pipeline.ask_streaming(
+                        self.query,
+                        self._emit_event,
+                        history=self.history,
+                        backend=self.backend,
+                        cloud_model=self.cloud_model,
+                        cloud_client=self.cloud_client,
+                        usage_tracker=self.usage_tracker,
+                    )
                 except TypeError:
-                    # Pipeline doesn't support history kwarg — fall back
-                    result = self.pipeline.ask_streaming(self.query, self._emit_event)
+                    # Pipeline may not support all kwargs — try progressively simpler signatures
+                    try:
+                        result = self.pipeline.ask_streaming(
+                            self.query, self._emit_event, history=self.history
+                        )
+                    except TypeError:
+                        result = self.pipeline.ask_streaming(self.query, self._emit_event)
             else:
                 try:
                     result = self.pipeline.ask(self.query, history=self.history)
                 except TypeError:
-                    # Pipeline doesn't support history kwarg — fall back
                     result = self.pipeline.ask(self.query)
+            self.backend_used.emit(self.backend)
             self.result_ready.emit(result)
         except Exception as exc:
             self.error.emit(str(exc))
@@ -636,6 +664,54 @@ class _ActivityPanel(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# _CloudUsageIndicator
+# ---------------------------------------------------------------------------
+
+class _CloudUsageIndicator(QWidget):
+    """Status-bar widget showing Ollama Cloud local usage counters.
+
+    Visible only when the user has an API key or is in cloud/auto mode.
+    Refreshed by calling .refresh(tracker).
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._label = QLabel("")
+        self._label.setObjectName("muted")
+        self._label.setToolTip(
+            "Локальная оценка — Ollama не предоставляет точные остатки квоты.\n"
+            "Подробнее: ollama.com"
+        )
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(self._label)
+        self.hide()
+
+    def refresh(self, tracker) -> None:
+        """Update label text from tracker.snapshot()."""
+        if tracker is None:
+            self.hide()
+            return
+        snap = tracker.snapshot()
+        sess = snap.get("session", {})
+        week = snap.get("week", {})
+        rate_until = snap.get("rate_limited_until")
+
+        if rate_until and time.time() < rate_until:
+            from datetime import datetime
+            reset_str = datetime.fromtimestamp(rate_until).strftime("%H:%M")
+            self._label.setText(f"Облако · лимит исчерпан, сброс ~{reset_str}")
+            self._label.setStyleSheet("color: #f44336;")
+        else:
+            sess_n = sess.get("requests", 0)
+            week_n = week.get("requests", 0)
+            self._label.setText(f"Облако · сессия 5ч: {sess_n} · неделя 7д: {week_n}")
+            self._label.setStyleSheet("")
+
+        self.show()
+
+
+# ---------------------------------------------------------------------------
 # CompanionWindow
 # ---------------------------------------------------------------------------
 
@@ -659,6 +735,13 @@ class CompanionWindow(QMainWindow):
         self._activity_panel: _ActivityPanel | None = None
         self._anim_refs: list = []
 
+        # Cloud state
+        self._cloud_client = None
+        self._cloud_usage_tracker = None
+        self._online_cache: tuple[float, bool] | None = None  # (checked_at, result)
+        self._backend_label: QLabel | None = None
+        self._cloud_indicator: _CloudUsageIndicator | None = None
+
         # Compat shims
         self.chat_log = _StreamingChatLogCompat()
         self.results_list = _ResultsListCompat()
@@ -680,6 +763,7 @@ class CompanionWindow(QMainWindow):
         self._apply_tokens()
         self._apply_startup_appearance()
         self._refresh_index_status()
+        self._rebuild_cloud_clients()
 
         # Prune stale empty/untitled conversations accumulated from previous runs
         self.conv_store.prune_empty()
@@ -867,10 +951,20 @@ class CompanionWindow(QMainWindow):
         self.search_edit = self.chat_input
         self.search_btn = self.send_btn
 
+        # Backend indicator label (shown after each query in activity area)
+        self._backend_label = QLabel("")
+        self._backend_label.setObjectName("muted")
+        self._backend_label.hide()
+        center_v.addWidget(self._backend_label)
+
         # Status bar
         self.index_status_label = QLabel("Документов: — · Чанков: —")
         self.index_status_label.setObjectName("muted")
         self.statusBar().addPermanentWidget(self.index_status_label)
+
+        # Cloud usage indicator in status bar
+        self._cloud_indicator = _CloudUsageIndicator()
+        self.statusBar().addWidget(self._cloud_indicator)
 
     # ------------------------------------------------------------------
     # Theme / stylesheet
@@ -1127,12 +1221,37 @@ QLabel#assistantBubble {{
         self._streaming_answer = ""
         self.chat_log.setHtml("")
 
-        self.worker = QueryWorker(self.pipeline, text, history=history)
+        backend = self._decide_backend()
+        cloud_model = self.settings.get("cloud_model", "gpt-oss:120b-cloud") or "gpt-oss:120b-cloud"
+
+        self.worker = QueryWorker(
+            self.pipeline,
+            text,
+            history=history,
+            backend=backend,
+            cloud_model=cloud_model,
+            cloud_client=self._cloud_client,
+            usage_tracker=self._cloud_usage_tracker,
+        )
         self.worker.result_ready.connect(self._on_result)
         self.worker.event_received.connect(self._on_pipeline_event)
         self.worker.error.connect(self._on_error)
+        self.worker.backend_used.connect(self._on_backend_used)
         self.worker.finished.connect(self._cleanup_worker)
         self.worker.start()
+
+    def _on_backend_used(self, backend: str) -> None:
+        """Update backend label after a query completes."""
+        if self._backend_label is None:
+            return
+        if backend == "cloud":
+            cloud_model = self.settings.get("cloud_model", "")
+            self._backend_label.setText(f"Облако: {cloud_model}")
+        else:
+            self._backend_label.setText("Локально: Gemma")
+        self._backend_label.show()
+        # Refresh usage indicator
+        self._refresh_cloud_indicator()
 
     def _on_pipeline_event(self, event: dict) -> None:
         stage = event.get("stage", "")
@@ -1176,9 +1295,19 @@ QLabel#assistantBubble {{
             if panel:
                 panel.on_token()
         elif stage == "error":
-            self._set_status(f"Ошибка: {event.get('message', '')}")
+            msg = event.get("message", "")
+            self._set_status(f"Ошибка: {msg}")
             if panel:
-                panel.on_error(event.get("message", ""))
+                panel.on_error(msg)
+            # Show error in the current bubble
+            err_html = f'<span style="color: #f44336;">[Ошибка: {html.escape(msg)}]</span>'
+            if self._current_bubble_label is not None:
+                self._current_bubble_label.setHtml(err_html)
+            self.chat_log.setHtml(err_html)
+            self._stop_status_indicator()
+            self._stop_meta_pulse()
+            self.send_btn.setEnabled(True)
+            self.chat_input.setEnabled(True)
 
     def _on_result(self, result: dict[str, Any]) -> None:
         self._stop_status_indicator()
@@ -1516,6 +1645,85 @@ QLabel#assistantBubble {{
         self._refresh_index_status()
         self._reset_pipeline_retriever()
 
+    # ------------------------------------------------------------------
+    # Cloud client management
+    # ------------------------------------------------------------------
+
+    def _rebuild_cloud_clients(self) -> None:
+        """Build/rebuild OllamaCloudClient and CloudUsageTracker from current settings."""
+        api_key = self.settings.get("ollama_api_key", "").strip()
+        gen_mode = self.settings.get("gen_mode", "local")
+
+        # Always maintain a usage tracker (it's cheap; reads from disk lazily)
+        try:
+            from core.cloud_usage import CloudUsageTracker
+            self._cloud_usage_tracker = CloudUsageTracker()
+        except Exception:
+            self._cloud_usage_tracker = None
+
+        # Build cloud client only when key is present
+        if api_key:
+            try:
+                from core.cloud import OllamaCloudClient
+                self._cloud_client = OllamaCloudClient(api_key)
+            except Exception:
+                self._cloud_client = None
+        else:
+            self._cloud_client = None
+
+        # Update indicator visibility: hide for pure-local users with no key
+        if self._cloud_indicator is not None:
+            if not api_key and gen_mode == "local":
+                self._cloud_indicator.hide()
+            else:
+                self._cloud_indicator.refresh(self._cloud_usage_tracker)
+
+    def _is_online(self) -> bool:
+        """Check connectivity to ollama.com (cached ~30s, non-blocking on worker thread)."""
+        now = time.monotonic()
+        if self._online_cache is not None:
+            checked_at, result = self._online_cache
+            if now - checked_at < 30.0:
+                return result
+        try:
+            s = socket.create_connection(("ollama.com", 443), timeout=1.5)
+            s.close()
+            result = True
+        except OSError:
+            result = False
+        self._online_cache = (now, result)
+        return result
+
+    def _decide_backend(self) -> str:
+        """Return 'local' or 'cloud' based on gen_mode setting and current state."""
+        gen_mode = self.settings.get("gen_mode", "local")
+        api_key = self.settings.get("ollama_api_key", "").strip()
+
+        if gen_mode == "local":
+            return "local"
+
+        if gen_mode == "cloud":
+            # Always attempt cloud (pipeline will emit error event if it fails)
+            return "cloud"
+
+        # auto: cloud if key + online + not rate-limited, else local
+        if not api_key:
+            return "local"
+        if self._cloud_usage_tracker is not None and self._cloud_usage_tracker.is_rate_limited():
+            return "local"
+        if not self._is_online():
+            return "local"
+        return "cloud"
+
+    def _refresh_cloud_indicator(self) -> None:
+        if self._cloud_indicator is not None:
+            api_key = self.settings.get("ollama_api_key", "").strip()
+            gen_mode = self.settings.get("gen_mode", "local")
+            if not api_key and gen_mode == "local":
+                self._cloud_indicator.hide()
+            else:
+                self._cloud_indicator.refresh(self._cloud_usage_tracker)
+
     def _rebuild_pipeline(self) -> None:
         from windows.settings_dialog import DEFAULT_RERANK_MODEL
         db = self.settings.get("db_path") or ""
@@ -1558,6 +1766,7 @@ QLabel#assistantBubble {{
         if dlg.exec():
             self.settings = dlg.get_settings()
             self._rebuild_pipeline()
+            self._rebuild_cloud_clients()
             app = QApplication.instance()
             if app is not None:
                 apply_font_scale(app, self.settings.get("font_scale", 100))

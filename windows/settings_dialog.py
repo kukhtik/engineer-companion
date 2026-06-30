@@ -1,11 +1,12 @@
 """Settings dialog for Engineer Companion — Phase 4: tabbed QTabWidget.
 
 Persists to ~/.engineer-companion/settings.json.
-Four tabs (Russian labels):
+Five tabs (Russian labels):
   1. Библиотека и индекс  — paths, index stats, library button
   2. Качество поиска       — rerank, top_k, rerank_top_k, temperature, max_tokens, n_ctx, n_threads
   3. Внешний вид           — theme, font_scale, density
   4. Управление моделями   — LLM path + presence, embedder/reranker info, check button
+  5. Облако (Ollama)       — gen_mode, api_key, cloud_model, usage note
 """
 from __future__ import annotations
 
@@ -15,7 +16,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import Qt, QEvent
+from PySide6.QtCore import Qt, QEvent, QThread, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -60,9 +61,42 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "density": "comfortable",  # "comfortable" | "compact"
     # Tab 4
     "llm_model_path": "",
+    # Tab 5 — Cloud (Ollama)
+    "gen_mode": "local",           # "auto" | "local" | "cloud"
+    "ollama_api_key": "",
+    "cloud_model": "gpt-oss:120b-cloud",
 }
 
 DEFAULT_RERANK_MODEL = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
+
+
+# ---------------------------------------------------------------------------
+# Background worker: fetch model list from Ollama Cloud
+# ---------------------------------------------------------------------------
+
+class _ModelListWorker(QThread):
+    """Fetches OllamaCloudClient.list_models() off the UI thread."""
+
+    finished = Signal(list)   # list[str]
+    error = Signal(str)
+
+    def __init__(self, api_key: str, parent=None) -> None:
+        super().__init__(parent)
+        self._api_key = api_key
+
+    def run(self) -> None:
+        try:
+            from core.cloud import OllamaCloudClient, FALLBACK_MODELS
+            if not self._api_key.strip():
+                self.finished.emit(list(FALLBACK_MODELS))
+                return
+            client = OllamaCloudClient(self._api_key.strip())
+            models = client.list_models()
+            self.finished.emit(models if models else list(FALLBACK_MODELS))
+        except Exception as exc:
+            from core.cloud import FALLBACK_MODELS
+            self.error.emit(str(exc))
+            self.finished.emit(list(FALLBACK_MODELS))
 
 
 def load_settings() -> dict[str, Any]:
@@ -147,6 +181,7 @@ class SettingsDialog(QDialog):
         self.tabs.addTab(self._build_tab_quality(), "Качество поиска")
         self.tabs.addTab(self._build_tab_appearance(), "Внешний вид")
         self.tabs.addTab(self._build_tab_models(), "Модели")
+        self.tabs.addTab(self._build_tab_cloud(), "Облако (Ollama)")
         layout.addWidget(self.tabs)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -367,6 +402,72 @@ class SettingsDialog(QDialog):
         v.addStretch()
         return w
 
+    # ---- Tab 5: Облако (Ollama) ----
+
+    def _build_tab_cloud(self) -> QWidget:
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setSpacing(10)
+        v.setContentsMargins(12, 12, 12, 12)
+
+        mode_group = QGroupBox("Режим генерации")
+        mode_form = QFormLayout(mode_group)
+        mode_form.setSpacing(8)
+
+        self.gen_mode_combo = QComboBox()
+        self.gen_mode_combo.addItem(
+            "Авто (онлайн→облако, офлайн→локально)", "auto"
+        )
+        self.gen_mode_combo.addItem("Только локально", "local")
+        self.gen_mode_combo.addItem("Только облако", "cloud")
+        mode_form.addRow("Режим:", self.gen_mode_combo)
+        v.addWidget(mode_group)
+
+        key_group = QGroupBox("API-ключ Ollama")
+        key_v = QVBoxLayout(key_group)
+        key_form = QFormLayout()
+        key_form.setSpacing(8)
+
+        self.cloud_api_key_edit = QLineEdit()
+        self.cloud_api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.cloud_api_key_edit.setPlaceholderText("ollama_…")
+        key_form.addRow("API-ключ:", self.cloud_api_key_edit)
+        key_v.addLayout(key_form)
+
+        key_link = QLabel(
+            '<a href="https://ollama.com/settings/keys">ollama.com/settings/keys</a>'
+        )
+        key_link.setOpenExternalLinks(True)
+        key_link.setObjectName("muted")
+        key_v.addWidget(key_link)
+        v.addWidget(key_group)
+
+        model_group = QGroupBox("Модель облака")
+        model_h = QHBoxLayout(model_group)
+
+        self.cloud_model_combo = QComboBox()
+        self.cloud_model_combo.setEditable(True)
+        model_h.addWidget(self.cloud_model_combo, stretch=1)
+
+        refresh_btn = QPushButton("Обновить список")
+        refresh_btn.clicked.connect(self._on_refresh_cloud_models)
+        model_h.addWidget(refresh_btn)
+        self._cloud_refresh_btn = refresh_btn
+
+        v.addWidget(model_group)
+
+        note = QLabel(
+            "Ollama не отдаёт точный остаток квоты через API — учёт локальный;\n"
+            "лимиты сбрасываются каждые 5 ч (сессия) и 7 дней (неделя).\n"
+            "Ключ: ollama.com/settings/keys"
+        )
+        note.setObjectName("muted")
+        note.setWordWrap(True)
+        v.addWidget(note)
+
+        v.addStretch()
+        return w
+
     # ------------------------------------------------------------------
     # Populate from current settings
     # ------------------------------------------------------------------
@@ -407,6 +508,28 @@ class SettingsDialog(QDialog):
         # Tab 4
         self.llm_path_edit.setText(s.get("llm_model_path", ""))
         self._update_llm_status()
+
+        # Tab 5 — Cloud
+        gen_mode = s.get("gen_mode", "local")
+        gm_idx = self.gen_mode_combo.findData(gen_mode)
+        if gm_idx >= 0:
+            self.gen_mode_combo.setCurrentIndex(gm_idx)
+
+        self.cloud_api_key_edit.setText(s.get("ollama_api_key", ""))
+
+        # Populate cloud model combo with fallback models; select saved model
+        from core.cloud import FALLBACK_MODELS
+        saved_model = s.get("cloud_model", "gpt-oss:120b-cloud")
+        self.cloud_model_combo.clear()
+        for m in FALLBACK_MODELS:
+            self.cloud_model_combo.addItem(m)
+        # If saved model not in list, add it at top
+        idx = self.cloud_model_combo.findText(saved_model)
+        if idx < 0:
+            self.cloud_model_combo.insertItem(0, saved_model)
+            self.cloud_model_combo.setCurrentIndex(0)
+        else:
+            self.cloud_model_combo.setCurrentIndex(idx)
 
         # Index stats (async-safe: just call directly, it's fast)
         self._refresh_stats()
@@ -495,6 +618,35 @@ class SettingsDialog(QDialog):
         QMessageBox.information(self, "Проверка моделей", "\n".join(lines))
 
     # ------------------------------------------------------------------
+    # Tab 5 helpers
+    # ------------------------------------------------------------------
+
+    def _on_refresh_cloud_models(self) -> None:
+        """Fetch model list from Ollama Cloud in a background thread."""
+        api_key = self.cloud_api_key_edit.text().strip()
+        self._cloud_refresh_btn.setEnabled(False)
+        self._cloud_refresh_btn.setText("Загрузка…")
+        self._model_list_worker = _ModelListWorker(api_key, parent=self)
+        self._model_list_worker.finished.connect(self._on_cloud_models_received)
+        self._model_list_worker.start()
+
+    def _on_cloud_models_received(self, models: list) -> None:
+        """Populate the cloud model combo with the fetched list."""
+        self._cloud_refresh_btn.setEnabled(True)
+        self._cloud_refresh_btn.setText("Обновить список")
+        current_text = self.cloud_model_combo.currentText()
+        self.cloud_model_combo.clear()
+        for m in models:
+            self.cloud_model_combo.addItem(m)
+        # Restore the previously selected/typed model if still present
+        idx = self.cloud_model_combo.findText(current_text)
+        if idx >= 0:
+            self.cloud_model_combo.setCurrentIndex(idx)
+        elif current_text:
+            self.cloud_model_combo.insertItem(0, current_text)
+            self.cloud_model_combo.setCurrentIndex(0)
+
+    # ------------------------------------------------------------------
     # Accept
     # ------------------------------------------------------------------
 
@@ -517,6 +669,10 @@ class SettingsDialog(QDialog):
             "density": self.density_combo.currentData() or "comfortable",
             # Tab 4
             "llm_model_path": self.llm_path_edit.text().strip(),
+            # Tab 5 — Cloud
+            "gen_mode": self.gen_mode_combo.currentData() or "local",
+            "ollama_api_key": self.cloud_api_key_edit.text().strip(),
+            "cloud_model": self.cloud_model_combo.currentText().strip() or "gpt-oss:120b-cloud",
         }
         save_settings(self.current)
         self.accept()

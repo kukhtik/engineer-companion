@@ -46,19 +46,20 @@ def _make_dlg(app, settings=None):
 # ---------------------------------------------------------------------------
 
 class TestSettingsDialogStructure:
-    def test_dialog_builds_with_4_tabs(self, app):
+    def test_dialog_builds_with_5_tabs(self, app):
         dlg = _make_dlg(app)
-        assert dlg.tabs.count() == 4
+        assert dlg.tabs.count() == 5
         dlg.deleteLater()
         app.processEvents()
 
     def test_tab_labels_are_russian(self, app):
         dlg = _make_dlg(app)
-        labels = [dlg.tabs.tabText(i) for i in range(4)]
+        labels = [dlg.tabs.tabText(i) for i in range(5)]
         assert any("Библиотека" in l for l in labels)
         assert any("Качество" in l for l in labels)
         assert any("Внешний" in l or "вид" in l.lower() for l in labels)
         assert any("Модел" in l for l in labels)
+        assert any("Облако" in l or "Ollama" in l for l in labels)
         dlg.deleteLater()
         app.processEvents()
 
@@ -78,6 +79,10 @@ class TestSettingsDialogStructure:
         assert hasattr(dlg, "density_combo")
         # Tab 4 widgets
         assert hasattr(dlg, "llm_path_edit")
+        # Tab 5 widgets
+        assert hasattr(dlg, "gen_mode_combo")
+        assert hasattr(dlg, "cloud_api_key_edit")
+        assert hasattr(dlg, "cloud_model_combo")
         dlg.deleteLater()
         app.processEvents()
 
