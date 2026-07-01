@@ -1164,6 +1164,17 @@ QLabel#assistantBubble {{
     # ------------------------------------------------------------------
 
     def _on_search(self) -> None:
+        # Re-entrancy guard: chat_input.returnPressed and send_btn's
+        # "Ctrl+Return" shortcut can both fire for a single keypress. Without
+        # this guard, a second call would overwrite self.worker while the
+        # first QueryWorker (a QThread) is still running in the background,
+        # orphaning it mid-flight — Qt then destroys the still-running
+        # QThread's Python wrapper, which corrupts Shiboken's internal
+        # weak-reference bookkeeping and surfaces as a confusing
+        # "cannot create weak reference to 'NoneType' object" error.
+        if self.worker is not None and self.worker.isRunning():
+            return
+
         text = self.chat_input.text().strip()
         if not text:
             return

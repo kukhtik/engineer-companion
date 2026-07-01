@@ -197,6 +197,69 @@ class TestMultiTurnHistory:
 
 
 # ---------------------------------------------------------------------------
+# TestSearchReentrancyGuard
+# ---------------------------------------------------------------------------
+
+class TestSearchReentrancyGuard:
+    """_on_search() must ignore a second call while a worker is still running.
+
+    Regression test: chat_input.returnPressed and send_btn's "Ctrl+Return"
+    shortcut can both fire for a single keypress. Without a re-entrancy guard,
+    the second _on_search() call overwrites self.worker while the first
+    QueryWorker (a QThread) is still running, orphaning it mid-flight — Qt
+    then destroys a still-running QThread's Python wrapper, corrupting
+    Shiboken's internal weak-reference bookkeeping ("cannot create weak
+    reference to 'NoneType' object").
+    """
+
+    class SlowPipeline:
+        """A pipeline whose ask() takes long enough that the worker thread
+        is still alive when a second _on_search() call is attempted."""
+
+        def __init__(self):
+            self.call_count = 0
+
+        def ask(self, query, history=None):
+            import time
+            self.call_count += 1
+            time.sleep(0.3)
+            return {"answer": "Answer for: " + query, "sources": []}
+
+    def test_second_call_ignored_while_worker_running(self, app):
+        pipeline = self.SlowPipeline()
+        w = CompanionWindow(pipeline=pipeline)
+        w.show()
+        app.processEvents()
+        try:
+            w.chat_input.setText("first question")
+            w._on_search()
+            first_worker = w.worker
+            assert first_worker is not None
+            assert first_worker.isRunning()
+
+            # Simulate the double-fire: call _on_search() again immediately,
+            # while the first worker is still alive.
+            w.chat_input.setText("second question (should be ignored)")
+            w._on_search()
+
+            # The guard must have returned early: same worker object, and
+            # chat_input must NOT have been cleared by a second invocation.
+            assert w.worker is first_worker
+            assert w.chat_input.text() == "second question (should be ignored)"
+
+            for _ in range(200):
+                app.processEvents()
+                if w.worker is None:
+                    break
+
+            # Only ONE query should have reached the pipeline.
+            assert pipeline.call_count == 1
+        finally:
+            w.deleteLater()
+            app.processEvents()
+
+
+# ---------------------------------------------------------------------------
 # TestFavorites
 # ---------------------------------------------------------------------------
 
