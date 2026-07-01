@@ -1736,23 +1736,23 @@ QLabel#assistantBubble {{
         rerank_enabled = self.settings.get("rerank_enabled", True)
         rerank_model = DEFAULT_RERANK_MODEL if rerank_enabled else ""
 
-        if llm_path:
-            try:
-                self.pipeline = RAGQueryPipeline(
-                    db_path=Path(db) if db else _default_db_path(),
-                    llm_model_path=Path(llm_path),
-                    top_k=self.settings.get("top_k", 8),
-                    rerank_top_k=self.settings.get("rerank_top_k", 5),
-                    rerank_model=rerank_model,
-                    max_tokens=self.settings.get("max_tokens", 512),
-                    temperature=self.settings.get("temperature", 0.3),
-                    llm_n_ctx=self.settings.get("n_ctx", 2048),
-                    llm_n_threads=self.settings.get("n_threads", 2),
-                )
-            except Exception as exc:
-                QMessageBox.warning(self, "Ошибка", f"Не удалось загрузить модель:\n{exc}")
-                self.pipeline = None
-        else:
+        # Build the pipeline whenever retrieval is possible, even without a
+        # local GGUF — cloud-only generation (backend="cloud") needs only
+        # retrieval; RAGQueryPipeline handles llm_model_path=None gracefully.
+        try:
+            self.pipeline = RAGQueryPipeline(
+                db_path=Path(db) if db else _default_db_path(),
+                llm_model_path=Path(llm_path) if llm_path else None,
+                top_k=self.settings.get("top_k", 8),
+                rerank_top_k=self.settings.get("rerank_top_k", 5),
+                rerank_model=rerank_model,
+                max_tokens=self.settings.get("max_tokens", 512),
+                temperature=self.settings.get("temperature", 0.3),
+                llm_n_ctx=self.settings.get("n_ctx", 2048),
+                llm_n_threads=self.settings.get("n_threads", 2),
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Ошибка", f"Не удалось инициализировать пайплайн:\n{exc}")
             self.pipeline = None
 
     def _on_open_ocr(self) -> None:
