@@ -15,11 +15,15 @@ Phase C changes:
 """
 
 import html
+import inspect
 import json
+import logging
+import logging.handlers
 import re
 import socket
 import sys
 import time
+import traceback
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -44,6 +48,10 @@ from windows.app_paths import db_path as _default_db_path, ensure_seeded, data_r
 from windows.settings_dialog import SettingsDialog, load_settings  # noqa: E402
 from windows.theme import ThemeManager  # noqa: E402
 from windows.anim import fade_in  # noqa: E402
+
+import structlog  # noqa: E402
+
+logger = structlog.get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -334,39 +342,79 @@ class QueryWorker(QThread):
         self.cloud_client = cloud_client
         self.usage_tracker = usage_tracker
 
+    @staticmethod
+    def _accepted_kwargs(callable_obj) -> set[str] | None:
+        """Return the set of kwarg names ``callable_obj`` accepts, or None if
+        it accepts arbitrary kwargs (**kwargs) / its signature can't be
+        determined via introspection (conservative: caller should then send
+        no optional kwargs).
+
+        Unwraps a Mock's ``side_effect`` (if set to a plain function) so
+        tests that stub ``pipeline.ask_streaming.side_effect = fn`` are
+        introspected against the real ``fn``, not the generic Mock call
+        signature.
+        """
+        target = callable_obj
+        side_effect = getattr(callable_obj, "side_effect", None)
+        if callable(side_effect) and not isinstance(side_effect, type):
+            target = side_effect
+        try:
+            params = inspect.signature(target).parameters
+        except (TypeError, ValueError):
+            return set()
+        if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+            return None  # accepts **kwargs — forward everything
+        return set(params)
+
     def run(self) -> None:
         try:
             if hasattr(self.pipeline, "ask_streaming"):
-                try:
-                    result = self.pipeline.ask_streaming(
-                        self.query,
-                        self._emit_event,
-                        history=self.history,
-                        backend=self.backend,
-                        cloud_model=self.cloud_model,
-                        cloud_client=self.cloud_client,
-                        usage_tracker=self.usage_tracker,
-                    )
-                except TypeError:
-                    # Pipeline may not support all kwargs — try progressively simpler signatures
-                    try:
-                        result = self.pipeline.ask_streaming(
-                            self.query, self._emit_event, history=self.history
-                        )
-                    except TypeError:
-                        result = self.pipeline.ask_streaming(self.query, self._emit_event)
+                # Introspect the target signature ONCE, before making any
+                # call, instead of catch-and-retry on TypeError. The old
+                # pattern wrapped the whole (side-effecting!) call in
+                # try/except TypeError and re-invoked ask_streaming with
+                # fewer kwargs on ANY TypeError — including one raised deep
+                # inside the call after real work had already happened
+                # (e.g. a cloud request already completed and usage already
+                # recorded). That masked the true error, silently repeated
+                # a network call, and — since the fallback omits backend=
+                # entirely — retried with backend="local" by default.
+                accepted = self._accepted_kwargs(self.pipeline.ask_streaming)
+
+                def _wants(name: str) -> bool:
+                    return accepted is None or name in accepted
+
+                kwargs: dict[str, Any] = {}
+                if _wants("history"):
+                    kwargs["history"] = self.history
+                if _wants("backend"):
+                    kwargs["backend"] = self.backend
+                if _wants("cloud_model"):
+                    kwargs["cloud_model"] = self.cloud_model
+                if _wants("cloud_client"):
+                    kwargs["cloud_client"] = self.cloud_client
+                if _wants("usage_tracker"):
+                    kwargs["usage_tracker"] = self.usage_tracker
+                result = self.pipeline.ask_streaming(self.query, self._emit_event, **kwargs)
             else:
-                try:
+                accepted = self._accepted_kwargs(self.pipeline.ask)
+                if accepted is None or "history" in accepted:
                     result = self.pipeline.ask(self.query, history=self.history)
-                except TypeError:
+                else:
                     result = self.pipeline.ask(self.query)
             self.backend_used.emit(self.backend)
             self.result_ready.emit(result)
         except Exception as exc:
+            logger.error("query_worker_failed", error=str(exc), traceback=traceback.format_exc())
             self.error.emit(str(exc))
 
     def _emit_event(self, event: dict) -> None:
-        self.event_received.emit(event)
+        try:
+            self.event_received.emit(event)
+        except Exception:
+            # Never let a UI-signal marshaling hiccup abort an in-flight
+            # generation (local or cloud) — log it and keep streaming.
+            logger.error("event_emit_failed", stage=event.get("stage"), traceback=traceback.format_exc())
 
 
 # ---------------------------------------------------------------------------
@@ -1887,7 +1935,54 @@ QLabel#assistantBubble {{
         pass  # History restored via ConversationStore
 
 
+def _configure_logging() -> None:
+    """Route structlog + uncaught exceptions to a rotating log file.
+
+    The app normally runs via run_app.bat -> pythonw.exe (no console), so
+    without this, logger.error(...) calls and any exception that escapes a
+    Qt slot are silently discarded — making a crash impossible to diagnose
+    after the fact. Never let logging setup itself break the app.
+    """
+    try:
+        log_dir = data_root() / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / "engineer_companion.log"
+
+        handler = logging.handlers.RotatingFileHandler(
+            log_file, maxBytes=2_000_000, backupCount=3, encoding="utf-8"
+        )
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+        )
+        root = logging.getLogger()
+        root.addHandler(handler)
+        root.setLevel(logging.INFO)
+
+        structlog.configure(
+            processors=[
+                structlog.processors.TimeStamper(fmt="iso"),
+                structlog.stdlib.add_log_level,
+                structlog.processors.format_exc_info,
+                structlog.processors.KeyValueRenderer(key_order=["event"]),
+            ],
+            wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
+            logger_factory=structlog.stdlib.LoggerFactory(),
+            cache_logger_on_first_use=True,
+        )
+
+        def _excepthook(exc_type, exc_value, exc_tb):
+            logging.getLogger("uncaught").error(
+                "Uncaught exception", exc_info=(exc_type, exc_value, exc_tb)
+            )
+            sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+        sys.excepthook = _excepthook
+    except Exception:
+        pass
+
+
 def main() -> None:
+    _configure_logging()
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--db-path", type=Path, default=None,

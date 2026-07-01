@@ -2,6 +2,7 @@
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -247,10 +248,15 @@ class TestSearchReentrancyGuard:
             assert w.worker is first_worker
             assert w.chat_input.text() == "second question (should be ignored)"
 
+            # SlowPipeline.ask() sleeps 0.3s on the worker thread; a tight
+            # processEvents() loop with no sleep can burn through all
+            # iterations before the OS thread scheduler even starts running
+            # it, so give it real wall-clock time to finish.
             for _ in range(200):
                 app.processEvents()
                 if w.worker is None:
                     break
+                time.sleep(0.01)
 
             # Only ONE query should have reached the pipeline.
             assert pipeline.call_count == 1

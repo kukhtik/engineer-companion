@@ -50,3 +50,6 @@ android/.gradle/
 
 # Cloud usage tracking (dev copy at repo root)
 cloud_usage.json
+
+# Runtime error log (data_root()/logs)
+logs/
