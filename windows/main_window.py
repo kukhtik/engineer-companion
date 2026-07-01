@@ -447,6 +447,8 @@ class _ActivityPanel(QWidget):
         self._has_rerank: bool = False
         self._anim_refs: list = []
         self._gen_timer: QTimer | None = None
+        self.last_token_count: int = 0
+        self.last_elapsed: float = 0.0
 
         self._build_ui()
         self.hide()
@@ -665,8 +667,22 @@ class _ActivityPanel(QWidget):
         self._tokens_label.setText(f"{self._token_count} токенов")
         self._tps_label.setText(f"{tps:.1f} т/с")
 
-    def on_done(self) -> str:
-        """Collapse strip to summary line briefly, then hide the panel."""
+    def on_done(self, prompt_tokens: int = 0, completion_tokens: int = 0) -> str:
+        """Collapse strip to summary line briefly, then hide the panel.
+
+        Returns the summary string (backward-compatible with existing
+        callers/tests). The final token count and elapsed seconds are ALSO
+        stashed on self.last_token_count / self.last_elapsed so the caller
+        can attach a PERSISTENT stats caption to the message itself — the
+        activity-panel summary below auto-hides after a few seconds, which
+        made it look like tokens/tok-s "weren't counted" for fast (esp.
+        cloud) responses that finish before the viewer looks back at it.
+
+        completion_tokens, when > 0, is the AUTHORITATIVE count reported by
+        the backend (e.g. Ollama Cloud's real eval_count) and is used
+        instead of the panel's own per-chunk _token_count, which only
+        approximates real tokens by counting stream pieces.
+        """
         if self._gen_timer:
             self._gen_timer.stop()
             self._gen_timer = None
@@ -674,12 +690,16 @@ class _ActivityPanel(QWidget):
         elapsed = time.monotonic() - self._gen_start_time if self._gen_start_time > 0 else 0.0
         self._set_stage_style("generate_start", "done")
 
+        final_count = completion_tokens if completion_tokens > 0 else self._token_count
+        self.last_token_count = final_count
+        self.last_elapsed = elapsed
+
         # Build summary
         parts = [f"✓ найдено {self._found_count}"]
         if self._has_rerank:
             parts.append(f"реранж {self._rerank_from}→{self._rerank_to}")
         parts.append(f"{self._sources_k} источников")
-        parts.append(f"{self._token_count} токенов за {elapsed:.0f}s")
+        parts.append(f"{final_count} токенов за {elapsed:.1f}s")
         summary = " · ".join(parts)
 
         self._strip_frame.hide()
@@ -1167,7 +1187,22 @@ QLabel#assistantBubble {{
         action_row.addWidget(star_btn)
         action_row.addWidget(copy_btn)
         action_row.addStretch()
+
+        # Persistent generation stats (tokens/elapsed/tok-s) — unlike the
+        # activity panel's transient summary (auto-hides after 2.5s), this
+        # stays attached to the message so it's visible whenever the user
+        # scrolls back, instead of only during a brief flash after a fast
+        # (esp. cloud) response finishes.
+        stats_lbl = QLabel("")
+        stats_lbl.setObjectName("muted")
+        stats_lbl.hide()
+        action_row.addWidget(stats_lbl)
         v.addLayout(action_row)
+
+        # Stashed as a plain attribute (not another objectName, which is
+        # already "muted" for styling) so _on_result can find and populate
+        # it without an objectName-based findChild lookup.
+        container.stats_label = stats_lbl
 
         return container, text_edit, sources_layout, star_btn, copy_btn
 
@@ -1374,9 +1409,22 @@ QLabel#assistantBubble {{
         answer = result.get("answer", "")
         sources = result.get("sources", [])
 
-        # Collapse activity panel to summary
+        # Collapse activity panel to summary; use the backend's AUTHORITATIVE
+        # completion_tokens (e.g. Ollama Cloud's real eval_count) when
+        # available instead of the panel's own per-chunk approximation.
         if self._activity_panel is not None:
-            self._activity_panel.on_done()
+            self._activity_panel.on_done(
+                result.get("prompt_tokens", 0), result.get("completion_tokens", 0)
+            )
+            token_count = self._activity_panel.last_token_count
+            elapsed = self._activity_panel.last_elapsed
+            tps = token_count / elapsed if elapsed > 0 else 0.0
+            stats_text = f"{token_count} токенов · {elapsed:.1f}s · {tps:.1f} т/с"
+            container = self._current_bubble_container
+            stats_lbl = getattr(container, "stats_label", None) if container is not None else None
+            if stats_lbl is not None and token_count > 0:
+                stats_lbl.setText(stats_text)
+                stats_lbl.show()
 
         # Finalize bubble text (remove caret, strip [ИСТОЧНИК N] tags)
         display_answer = _strip_source_tags(answer)
