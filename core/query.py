@@ -100,11 +100,16 @@ def _is_retrieval_garbage(text: str, section: str) -> bool:
 # with no technical noun at all ("подумай где она расположена, смотри
 # чертежи") therefore has nothing for the embedder to anchor on, and vector
 # search drifts to semantically-similar-sounding but topically unrelated
-# chunks. Folding the last user turn into the retrieval query (NOT into the
+# chunks. Folding prior user turns into the retrieval query (NOT into the
 # prompt's literal "ВОПРОС:" — that stays the verbatim question) restores
 # the missing noun phrase cheaply, with no extra LLM call.
-_MAX_HISTORY_ANCHOR_CHARS = 200
-_MAX_ANCHOR_TURNS = 2  # a follow-up can drift 2+ hops from the topic-bearing turn
+#
+# The whole chat is considered, not just the last turn or two — a topic set
+# early can still be the referent many turns later. But the anchor is capped
+# by a total character budget (most recent turns kept in full, older ones
+# dropped first) so a long chat doesn't dilute the embedding with stale topics.
+_MAX_HISTORY_ANCHOR_CHARS = 200  # per-turn cap
+_MAX_TOTAL_ANCHOR_CHARS = 600  # whole-anchor budget across all carried-forward turns
 
 
 def _resolve_retrieval_query(query: str, history: list[dict] | None) -> str:
@@ -112,14 +117,21 @@ def _resolve_retrieval_query(query: str, history: list[dict] | None) -> str:
         return query
     q = query.strip()
     user_turns = [
-        (t.get("content") or "").strip()
+        (t.get("content") or "").strip()[:_MAX_HISTORY_ANCHOR_CHARS]
         for t in history
         if t.get("role") == "user" and (t.get("content") or "").strip() != q
     ]
-    anchor_turns = user_turns[-_MAX_ANCHOR_TURNS:]
-    if not anchor_turns:
+    if not user_turns:
         return query
-    anchor = " ".join(t[:_MAX_HISTORY_ANCHOR_CHARS] for t in anchor_turns)
+    anchor_turns: list[str] = []
+    budget = _MAX_TOTAL_ANCHOR_CHARS
+    for turn in reversed(user_turns):
+        if budget <= 0:
+            break
+        anchor_turns.append(turn[:budget])
+        budget -= len(turn) + 1
+    anchor_turns.reverse()
+    anchor = " ".join(anchor_turns)
     return f"{anchor} {query}"
 
 

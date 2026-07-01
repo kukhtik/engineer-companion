@@ -404,4 +404,33 @@ class TestRetrievalQueryResolution:
         resolved = _resolve_retrieval_query("что такое MLC?", history)
         assert resolved == "что такое MLC?"
 
+    def test_topic_set_many_turns_ago_still_carries_forward(self):
+        # The old fix only looked at the last 2 user turns, so a topic set
+        # at turn 1 was lost by turn 6+. The anchor must span the whole
+        # chat (bounded by a char budget), not a fixed short window.
+        history = [
+            {"role": "user", "content": "где плата BGM-PWM"},
+            {"role": "assistant", "content": "..."},
+            {"role": "user", "content": "а что насчёт питания"},
+            {"role": "assistant", "content": "..."},
+            {"role": "user", "content": "какое напряжение"},
+            {"role": "assistant", "content": "..."},
+            {"role": "user", "content": "а разъём какой"},
+            {"role": "assistant", "content": "..."},
+        ]
+        resolved = _resolve_retrieval_query("покажи её на чертеже", history)
+        assert "BGM-PWM" in resolved
+        assert "покажи её на чертеже" in resolved
+
+    def test_very_long_history_bounded_by_total_char_budget(self):
+        # A long-running chat must not balloon the retrieval query without
+        # bound — old, no-longer-relevant turns get dropped first.
+        history = [
+            {"role": "user", "content": f"вопрос номер {i} " * 20}
+            for i in range(20)
+        ]
+        resolved = _resolve_retrieval_query("текущий вопрос", history)
+        assert resolved.endswith("текущий вопрос")
+        assert len(resolved) < 900
+
 
