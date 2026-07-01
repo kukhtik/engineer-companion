@@ -183,7 +183,12 @@ class Retriever:
         hits = [h for h in all_hits if not _is_retrieval_garbage(h.text, h.section)]
         n_dropped = len(all_hits) - len(hits)
         if n_dropped:
-            logger.info("retrieval_quality_filter", dropped=n_dropped, kept=len(hits))
+            logger.info(
+                "retrieval_quality_filter",
+                dropped=n_dropped,
+                kept=len(hits),
+                query=query[:120],
+            )
         # Keep at most top_k clean candidates for the reranker.
         hits = hits[:self.top_k]
 
@@ -226,7 +231,12 @@ class Retriever:
         hits = [h for h in all_hits if not _is_retrieval_garbage(h.text, h.section)]
         n_dropped = len(all_hits) - len(hits)
         if n_dropped:
-            logger.info("retrieval_quality_filter", dropped=n_dropped, kept=len(hits))
+            logger.info(
+                "retrieval_quality_filter",
+                dropped=n_dropped,
+                kept=len(hits),
+                query=query[:120],
+            )
         # Keep at most top_k clean candidates for the reranker.
         hits = hits[:self.top_k]
 

@@ -404,9 +404,21 @@ class QueryWorker(QThread):
                     result = self.pipeline.ask(self.query)
             self.backend_used.emit(self.backend)
             self.result_ready.emit(result)
+        except MemoryError as exc:
+            # MemoryError (esp. from torch/sentence-transformers' import
+            # machinery under low free RAM) usually carries NO message —
+            # str(exc) == "" — which rendered as a blank "[Ошибка: ]" bubble
+            # that looked like an empty/irrelevant answer rather than a
+            # clear "out of memory" error.
+            logger.error("query_worker_failed", error="MemoryError", traceback=traceback.format_exc())
+            self.error.emit(
+                "Недостаточно оперативной памяти для загрузки моделей. "
+                "Закройте другие приложения (браузер, IDE и т.п.) и повторите запрос."
+            )
         except Exception as exc:
-            logger.error("query_worker_failed", error=str(exc), traceback=traceback.format_exc())
-            self.error.emit(str(exc))
+            msg = str(exc) or type(exc).__name__
+            logger.error("query_worker_failed", error=msg, traceback=traceback.format_exc())
+            self.error.emit(msg)
 
     def _emit_event(self, event: dict) -> None:
         try:
