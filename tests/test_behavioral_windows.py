@@ -169,7 +169,12 @@ class TestMultiTurnHistory:
             self.captured_history = history
             return {"answer": "Answer for: " + query, "sources": []}
 
-    def test_history_passed_to_worker(self, app):
+    def test_history_passed_to_worker(self, app, tmp_path, monkeypatch):
+        # Point data_root to a temp dir — ConversationStore persists to
+        # data_root()/conversations.json, which in dev mode is the repo
+        # root; without this, a fake turn like "Answer for: first question"
+        # leaks into the real app's conversation history.
+        monkeypatch.setattr("windows.main_window.data_root", lambda: tmp_path)
         pipeline = self.HistoryCapturePipeline()
         w = CompanionWindow(pipeline=pipeline)
         w.show()
@@ -226,7 +231,10 @@ class TestSearchReentrancyGuard:
             time.sleep(0.3)
             return {"answer": "Answer for: " + query, "sources": []}
 
-    def test_second_call_ignored_while_worker_running(self, app):
+    def test_second_call_ignored_while_worker_running(self, app, tmp_path, monkeypatch):
+        # Isolate ConversationStore from the real dev-mode conversations.json
+        # (data_root() = repo root in dev — shared with the real running app).
+        monkeypatch.setattr("windows.main_window.data_root", lambda: tmp_path)
         pipeline = self.SlowPipeline()
         w = CompanionWindow(pipeline=pipeline)
         w.show()
