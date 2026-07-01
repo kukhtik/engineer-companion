@@ -8,7 +8,13 @@ sys.path.insert(0, str(_REPO))
 
 import pytest
 from core.indexer import Chunker, Chunk, PdfTextExtractor, _estimate_tokens, is_low_quality_chunk
-from core.query import PromptBuilder, SearchResult, Retriever, _is_retrieval_garbage
+from core.query import (
+    PromptBuilder,
+    SearchResult,
+    Retriever,
+    _is_retrieval_garbage,
+    _resolve_retrieval_query,
+)
 
 
 class TestEstimateTokens:
@@ -352,5 +358,50 @@ class TestRetrievalGarbageFilter:
     def test_clean_steps_section_passes(self):
         text = "In the Service screen, choose MLC > Communications to start the session."
         assert _is_retrieval_garbage(text, "Steps") is False
+
+
+class TestRetrievalQueryResolution:
+    """Anaphoric follow-ups ("она", "смотри чертежи") must resolve against
+    recent history before embedding, or vector search drifts to unrelated
+    content — reproduced from a real chat log where a follow-up with no
+    topical noun at all pulled totally unrelated procedural chunks."""
+
+    def test_no_history_returns_query_unchanged(self):
+        assert _resolve_retrieval_query("что такое MLC?", None) == "что такое MLC?"
+        assert _resolve_retrieval_query("что такое MLC?", []) == "что такое MLC?"
+
+    def test_single_hop_anchors_to_previous_user_turn(self):
+        history = [
+            {"role": "user", "content": "где плата BGM-PWM"},
+            {"role": "assistant", "content": "..."},
+        ]
+        resolved = _resolve_retrieval_query(
+            "подумай где она расположена, смотри чертежи", history
+        )
+        assert "BGM-PWM" in resolved
+        assert "смотри чертежи" in resolved
+
+    def test_two_hop_still_carries_topic_forward(self):
+        # A third follow-up, two turns removed from the topic-bearing
+        # question, must still resolve — real case: "где плата BGM-PWM" ->
+        # "подумай где она расположена, смотри чертежи" (itself vague) ->
+        # "ответа нет напрямую, ты должен сам понять" (also vague).
+        history = [
+            {"role": "user", "content": "где плата BGM-PWM"},
+            {"role": "assistant", "content": "..."},
+            {"role": "user", "content": "подумай где она расположена, смотри чертежи"},
+            {"role": "assistant", "content": "не найдено"},
+        ]
+        resolved = _resolve_retrieval_query(
+            "ответа на этот вопрос нет на прямую в документации, ты должен сам понять",
+            history,
+        )
+        assert "BGM-PWM" in resolved
+        assert "сам понять" in resolved
+
+    def test_duplicate_current_query_in_history_not_repeated(self):
+        history = [{"role": "user", "content": "что такое MLC?"}]
+        resolved = _resolve_retrieval_query("что такое MLC?", history)
+        assert resolved == "что такое MLC?"
 
 

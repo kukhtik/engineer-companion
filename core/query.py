@@ -91,6 +91,38 @@ def _is_retrieval_garbage(text: str, section: str) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# Conversational retrieval-query resolution
+# ---------------------------------------------------------------------------
+# Vector search embeds ONLY the current query text — conversation history is
+# otherwise injected solely into the LLM prompt, never into the search step.
+# A short follow-up that leans on anaphora ("она", "это") or an instruction
+# with no technical noun at all ("подумай где она расположена, смотри
+# чертежи") therefore has nothing for the embedder to anchor on, and vector
+# search drifts to semantically-similar-sounding but topically unrelated
+# chunks. Folding the last user turn into the retrieval query (NOT into the
+# prompt's literal "ВОПРОС:" — that stays the verbatim question) restores
+# the missing noun phrase cheaply, with no extra LLM call.
+_MAX_HISTORY_ANCHOR_CHARS = 200
+_MAX_ANCHOR_TURNS = 2  # a follow-up can drift 2+ hops from the topic-bearing turn
+
+
+def _resolve_retrieval_query(query: str, history: list[dict] | None) -> str:
+    if not history:
+        return query
+    q = query.strip()
+    user_turns = [
+        (t.get("content") or "").strip()
+        for t in history
+        if t.get("role") == "user" and (t.get("content") or "").strip() != q
+    ]
+    anchor_turns = user_turns[-_MAX_ANCHOR_TURNS:]
+    if not anchor_turns:
+        return query
+    anchor = " ".join(t[:_MAX_HISTORY_ANCHOR_CHARS] for t in anchor_turns)
+    return f"{anchor} {query}"
+
+
 @dataclass(frozen=True, slots=True)
 class SearchResult:
     text: str
@@ -159,9 +191,10 @@ class Retriever:
             self._table = db.open_table("chunks")
         return self._table
 
-    def search(self, query: str) -> list[SearchResult]:
+    def search(self, query: str, history: list[dict] | None = None) -> list[SearchResult]:
         model = self._get_model()
-        emb = model.encode(query, normalize_embeddings=True, device="cpu").tolist()
+        retrieval_query = _resolve_retrieval_query(query, history)
+        emb = model.encode(retrieval_query, normalize_embeddings=True, device="cpu").tolist()
 
         table = self._get_table()
         # Retrieve a larger pool so that after dropping garbage chunks there
@@ -188,6 +221,7 @@ class Retriever:
                 dropped=n_dropped,
                 kept=len(hits),
                 query=query[:120],
+                retrieval_query=retrieval_query[:160] if retrieval_query != query else None,
             )
         # Keep at most top_k clean candidates for the reranker.
         hits = hits[:self.top_k]
@@ -195,7 +229,7 @@ class Retriever:
         # Rerank if configured
         reranker = self._get_reranker()
         if reranker and hits:
-            pairs = [(query, h.text) for h in hits]
+            pairs = [(retrieval_query, h.text) for h in hits]
             scores = reranker.predict(pairs)
             ranked = [(s, h) for s, h in zip(scores, hits)]
             ranked.sort(key=lambda x: x[0], reverse=True)
@@ -204,12 +238,13 @@ class Retriever:
         return hits
 
     def search_streaming(
-        self, query: str, on_event: Callable[[dict], None]
+        self, query: str, on_event: Callable[[dict], None], history: list[dict] | None = None
     ) -> list[SearchResult]:
         """Like search(), but fires progress events via on_event at key steps."""
         on_event({"stage": "embed"})
         model = self._get_model()
-        emb = model.encode(query, normalize_embeddings=True, device="cpu").tolist()
+        retrieval_query = _resolve_retrieval_query(query, history)
+        emb = model.encode(retrieval_query, normalize_embeddings=True, device="cpu").tolist()
 
         table = self._get_table()
         # Retrieve a larger pool so that after dropping garbage chunks there
@@ -236,6 +271,7 @@ class Retriever:
                 dropped=n_dropped,
                 kept=len(hits),
                 query=query[:120],
+                retrieval_query=retrieval_query[:160] if retrieval_query != query else None,
             )
         # Keep at most top_k clean candidates for the reranker.
         hits = hits[:self.top_k]
@@ -246,7 +282,7 @@ class Retriever:
         reranker = self._get_reranker()
         if reranker and hits:
             n_before = len(hits)
-            pairs = [(query, h.text) for h in hits]
+            pairs = [(retrieval_query, h.text) for h in hits]
             scores = reranker.predict(pairs)
             ranked = [(s, h) for s, h in zip(scores, hits)]
             ranked.sort(key=lambda x: x[0], reverse=True)
@@ -364,7 +400,7 @@ class RAGQueryPipeline:
         return self._llm
 
     def ask(self, query: str, history: list[dict] | None = None) -> dict[str, Any]:
-        hits = self.retriever.search(query)
+        hits = self.retriever.search(query, history=history)
         prompt = self.builder.build(query, hits, history=history)
         context_meta = [
             {"source": h.source, "page": h.page, "section": h.section}
@@ -467,7 +503,7 @@ class RAGQueryPipeline:
             usage_tracker: CloudUsageTracker instance for recording cloud usage.
         """
         # --- Retrieval (identical for both backends) ---
-        hits = self.retriever.search_streaming(query, on_event)
+        hits = self.retriever.search_streaming(query, on_event, history=history)
         context_meta = [
             {"source": h.source, "page": h.page, "section": h.section}
             for h in hits
